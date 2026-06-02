@@ -51,6 +51,63 @@ def save_parameters(args, output_dir):
                     f.write(f"{key} = {value}\n")
     print(f"Parameters saved to {output_dir / 'parameters.txt'}")
 
+
+def build_eval_cache(test_dataset, physics, n_eval, device, seed):
+    """
+    Pre-generate fixed (x_gt, y_noisy) pairs.
+
+    Without this, Poisson noise is resampled every epoch and PSNR/val_loss are not
+    comparable across epochs, which makes the model look like it improves every time.
+    """
+    cpu_state = torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    cache = []
+    with torch.no_grad():
+        for i in range(n_eval):
+            x_clean_stack, x_clean = test_dataset[i]
+            x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
+            x_gt = x_clean.unsqueeze(0).to(device)
+            x_clean_img = x_clean_stack[:, 0:1, :, :]
+            y_noisy = physics(x_clean_img)
+            cache.append((x_gt.detach().cpu(), y_noisy.detach().cpu()))
+
+    torch.set_rng_state(cpu_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
+    print(f"Built eval cache with {len(cache)} fixed noisy samples (seed={seed}).")
+    return cache
+
+
+def evaluate_epoch(model, criterion, physics, eval_cache, device, eval_seed):
+    """Evaluate on fixed noisy inputs; R2R loss uses a fixed seed per sample."""
+    model.eval()
+    psnr_sum = 0.0
+    val_loss_sum = 0.0
+    n_eval = len(eval_cache)
+
+    with torch.no_grad():
+        for i, (x_gt_cpu, y_noisy_cpu) in enumerate(eval_cache):
+            x_gt = x_gt_cpu.to(device)
+            y_noisy = y_noisy_cpu.to(device)
+
+            x_est = model(y_noisy, physics)
+            psnr_sum += PSNR()(x=x_gt, x_net=x_est).item()
+
+            torch.manual_seed(eval_seed + i)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(eval_seed + i)
+            model.training = True
+            x_est_loss = model(y_noisy, physics, update_parameters=True)
+            val_loss_sum += criterion(x_est_loss, y_noisy, physics, model).item()
+            model.training = False
+
+    return psnr_sum / n_eval, val_loss_sum / n_eval
+
+
 def train_model(args):
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     output_dir = RESULTS_DIR / f"tif_output_{timestamp}"
@@ -87,10 +144,10 @@ def train_model(args):
     # num_frames=1 for 2D DRUNet
     train_dataset = FMDDataset(sequence_info=train_seq, patch_size=(args.patch_size, args.patch_size), 
                                 mode='clean', data_scale=args.data_scale, 
-                                num_frames=1, transform=transform)
+                                num_frames=1, transform=transform, repeats_per_sequence=55)
     test_dataset = FMDDataset(sequence_info=test_seq, mode='clean', 
                                data_scale=args.data_scale, 
-                               num_frames=1)
+                               num_frames=1, repeats_per_sequence=1)
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     
@@ -105,11 +162,20 @@ def train_model(args):
         raise ValueError("Only gr2r_mse is supported in this script version")
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    n_eval = len(test_seq)
+    if args.n_eval_sequences is not None:
+        n_eval = min(len(test_seq), args.n_eval_sequences)
+    eval_cache = build_eval_cache(test_dataset, physics, n_eval, device, args.eval_seed)
     
-    # 5. Training Loop
-    best_psnr = 0
+    # 5. Training Loop — checkpoint by val_loss on fixed eval data (not noisy PSNR)
+    best_val_loss = float("inf")
+    best_psnr = 0.0
+    best_epoch = -1
+    best_ckpt_path = output_dir / "best_model.pth"
     train_losses = []
     val_losses = []
+    val_psnrs = []
 
     for epoch in range(args.epochs):
         model.train()
@@ -138,50 +204,49 @@ def train_model(args):
             epoch_loss += loss.item()
             pbar.set_postfix({"loss": loss.item()}) #Es la barrita que muestra la loss en tiempo real
 
-        # 6. Evaluation
-        model.eval()
-        current_psnr = 0
-        current_val_loss = 0
-        # visualize_indices is loaded from the TXT split file
-        n_eval = min(len(test_dataset), 10)
-        with torch.no_grad():
-            for i in range(n_eval):
-                x_clean_stack, x_clean = test_dataset[i]
-                x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
-                x_gt = x_clean.unsqueeze(0).to(device)
-                
-                # x_clean_stack[:, 0:1, :, :] es el único frame limpio
-                x_clean_img = x_clean_stack[:, 0:1, :, :]
-                # Aplicar ruido Poisson via physics para obtener la observación ruidosa
-                y_noisy = physics(x_clean_img)
-                
-                # Forward pass for PSNR
-                x_est = model(y_noisy, physics)
-                current_psnr += PSNR()(x=x_gt, x_net=x_est).item()
-                
-                # Forward pass for val loss (R2R necesita update_parameters=True)
-                model.training = True 
-                x_est_loss = model(y_noisy, physics, update_parameters=True)
-                loss_val = criterion(x_est_loss, y_noisy, physics, model)
-                current_val_loss += loss_val.item()
-                model.training = False # Back to eval for the wrapper
-        
-        current_psnr /= n_eval
-        current_val_loss /= n_eval
+        # 6. Evaluation (fixed noisy inputs — comparable across epochs)
+        current_psnr, current_val_loss = evaluate_epoch(
+            model, criterion, physics, eval_cache, device, args.eval_seed
+        )
         train_losses.append(epoch_loss / len(train_dataloader))
         val_losses.append(current_val_loss)
+        val_psnrs.append(current_psnr)
 
-        print(f"Epoch {epoch+1} Average PSNR: {current_psnr:.2f} dB, Train Loss: {train_losses[-1]:.6f}, Val Loss: {val_losses[-1]:.6f}")
+        print(
+            f"Epoch {epoch+1} Val PSNR: {current_psnr:.2f} dB, "
+            f"Train Loss: {train_losses[-1]:.6f}, Val Loss: {current_val_loss:.6f}"
+        )
 
-        if current_psnr > best_psnr:
+        if current_val_loss < best_val_loss:
+            best_val_loss = current_val_loss
             best_psnr = current_psnr
-            torch.save(model.state_dict(), CKPT_DIR / "best_model.pth")
-            print(f"New best model saved! (PSNR: {best_psnr:.2f})")
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), best_ckpt_path)
+            print(
+                f"New best model saved to {best_ckpt_path} "
+                f"(epoch={best_epoch}, val_loss={best_val_loss:.6f}, val_psnr={best_psnr:.2f} dB)"
+            )
+        else:
+            print(
+                f"No checkpoint update (best epoch={best_epoch}, "
+                f"val_loss={best_val_loss:.6f}, val_psnr={best_psnr:.2f} dB)"
+            )
+
+    with open(output_dir / "best_checkpoint.txt", "w") as f:
+        f.write(f"best_epoch={best_epoch}\n")
+        f.write(f"best_val_loss={best_val_loss:.6f}\n")
+        f.write(f"best_val_psnr={best_psnr:.4f}\n")
+        f.write(f"weights_path={best_ckpt_path}\n")
 
     # 6.5 Plot Losses
     plt.figure(figsize=(10, 5))
     plt.plot(range(1, args.epochs + 1), train_losses, label="Train Loss")
     plt.plot(range(1, args.epochs + 1), val_losses, label="Val Loss")
+    if len(val_psnrs) == args.epochs:
+        ax2 = plt.gca().twinx()
+        ax2.plot(range(1, args.epochs + 1), val_psnrs, "g--", label="Val PSNR (dB)")
+        ax2.set_ylabel("Val PSNR (dB)")
+        ax2.legend(loc="lower right")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training and Validation Loss")
@@ -191,17 +256,25 @@ def train_model(args):
     plt.savefig(loss_plot_path)
     print(f"Loss plot saved to {loss_plot_path}")
 
-    # 7. Save final result as TIF
+    # 7. Save final result as TIF (using best-epoch weights)
+    if best_ckpt_path.exists():
+        model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+        print(f"Loaded best weights from epoch {best_epoch} for export.")
     print("Saving final results to TIFF...")
     model.eval()
     with torch.no_grad():
-        for i in [0, 1, 2]: # Samples from test set
+        # Prioritize explicit visualization selections from fmdd_split.txt.
+        # Fallback to the first 3 test samples if no visualize flag is provided.
+        export_indices = visualize_indices if len(visualize_indices) > 0 else [0, 1, 2]
+        for i in export_indices:
             if i >= len(test_dataset): break
             x_clean_stack, x_clean = test_dataset[i]
             x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
             x_gt = x_clean.unsqueeze(0).to(device)
             x_clean_img = x_clean_stack[:, 0:1, :, :]
-            # Generamos la observación ruidosa con physics (igual que en entrenamiento)
+            torch.manual_seed(args.eval_seed + i)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(args.eval_seed + i)
             y_noisy = physics(x_clean_img)
             
             x_est = model(y_noisy, physics)
@@ -221,6 +294,8 @@ class Args:
     lr = 1e-4
     patch_size = 256
     data_scale = 1.0 # Dataset now handles normalization to [0, 1]
+    n_eval_sequences = None  # None = all test sequences; set to int to cap (e.g. 10 for faster epochs)
+    eval_seed = 42  # fixed noise + R2R corruption for comparable validation
 
 if __name__ == "__main__":
     args = Args()
