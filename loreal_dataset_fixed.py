@@ -280,7 +280,7 @@ def get_fmdd_split_from_file(sequences, split_file):
     return train_seqs, test_seqs, final_viz_indices
 
 class FMDDataset(Dataset):
-    def __init__(self, sequence_info, patch_size=None, transform=None, data_scale=255.0, a=1.0, b=0.0, mode='raw', gamma=None, num_frames=5):
+    def __init__(self, sequence_info, patch_size=None, transform=None, data_scale=255.0, a=1.0, b=0.0, mode='raw', gamma=None, num_frames=5, repeats_per_sequence=55):
         """
         Dataset para FMDD:
         - Soporta imágenes .png
@@ -290,6 +290,7 @@ class FMDDataset(Dataset):
             'clean'     → devuelve solo la GT limpia (sin ruido); el ruido lo aplica physics externamente
         - gamma: Ganancia para el ruido de Poisson sintético (solo en mode='synthetic')
         - num_frames: Número de frames en el stack (5 para FastDVDnet, 1 para DRUNet)
+        - repeats_per_sequence: cuántas veces repetir cada GT en modos 'clean'/'synthetic'
         """
         self.patch_size = patch_size
         self.transform = transform
@@ -299,6 +300,7 @@ class FMDDataset(Dataset):
         self.mode = mode
         self.gamma = gamma
         self.num_frames = num_frames
+        self.repeats_per_sequence = repeats_per_sequence
         self.stacks = []
 
         for seq in sequence_info:
@@ -312,16 +314,15 @@ class FMDDataset(Dataset):
                         self.stacks.append((stack_paths, gt))
             elif self.mode == 'synthetic':
                 if gt:
-                    # En modo sintético, cada "stack" se genera desde la misma GT
-                    # Podemos añadir múltiples entradas por secuencia para aumentar el dataset
-                    # por ejemplo, 55 stacks por imagen GT para llegar a ~12000 parches
-                    for _ in range(55):
+                    # En modo sintético, cada "stack" se genera desde la misma GT.
+                    # El número de repeticiones se controla desde repeats_per_sequence.
+                    for _ in range(self.repeats_per_sequence):
                         self.stacks.append((None, gt))
             elif self.mode == 'clean':
                 if gt:
                     # En modo clean solo devolvemos el GT. El ruido lo aplica physics externamente.
-                    # Múltiples entradas por GT para aumentar el dataset (como en synthetic).
-                    for _ in range(55):
+                    # Repetimos para aumentar datos en train, pero en test conviene usar 1.
+                    for _ in range(self.repeats_per_sequence):
                         self.stacks.append((None, gt))
 
     def __len__(self):

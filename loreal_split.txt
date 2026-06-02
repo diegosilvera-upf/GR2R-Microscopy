@@ -1,0 +1,12 @@
+# SequenceFolderName, Split(train|val|test), Visualize(True|False)
+# Any valid sequence not listed here is automatically assigned to train.
+#
+# Example entries based on current Loreal folder names:
+# HF1_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir, val, True
+# Mela1_s0u0v0x0y0_Intensity_MelMask_SUM_YES_Vert-Autofluo.tif_dir, val, True
+# HF2_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir, test, False
+# Mela2_s0--u0--v0--x1--y1_Intensity_MelMask_SUM_YES_Vert-Autofluo.tif_dir, test, False
+
+HF8_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir, val, True
+HF1_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir, val, True
+057, val, True

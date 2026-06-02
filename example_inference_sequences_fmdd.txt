@@ -1,0 +1,7 @@
+# One sequence per line. Supported formats:
+#   Modality/seq_id          (requires --fmdd-root)
+#   /full/path/to/.../raw/N
+#
+# Examples (uncomment and edit paths for your machine):
+# TwoPhoton_BPAE_R/1
+# Confocal_BPAE_G/5

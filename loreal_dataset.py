@@ -71,14 +71,25 @@ def get_valid_sequences(sequence_paths, out_file="sequences_left_out_local.txt")
 
 class LorealSequenceDataset(Dataset):
     """
-    Localized version of Loreal dataset that supports both single-frame (DRUNet)
-    and multi-frame (FastDVDNet) loading from the same sequence structure.
+    Loreal dataset for single-frame (DRUNet) or multi-frame (FastDVDNet) stacks.
+
+    repeats_per_frame: each frame index is listed this many times in __len__.
+    Random cropping in __getitem__ yields different patches on each access.
     """
-    def __init__(self, sequence_info, patch_size=None, transform=None, data_scale=255.0, num_frames=5):
+    def __init__(
+        self,
+        sequence_info,
+        patch_size=None,
+        transform=None,
+        data_scale=255.0,
+        num_frames=5,
+        repeats_per_frame=1,
+    ):
         self.patch_size = patch_size
         self.transform = transform
         self.data_scale = data_scale
         self.num_frames = num_frames
+        self.repeats_per_frame = max(1, int(repeats_per_frame))
         self.stacks = []
 
         for seq_path, a, b in sequence_info:
@@ -95,7 +106,8 @@ class LorealSequenceDataset(Dataset):
                 mid = self.num_frames // 2
                 for i in range(mid, len(frames) - mid):
                     stack_paths = [str(f) for f in frames[i-mid : i-mid+self.num_frames]]
-                    self.stacks.append((stack_paths, float(a), float(b)))
+                    for _ in range(self.repeats_per_frame):
+                        self.stacks.append((stack_paths, float(a), float(b)))
 
     def __len__(self):
         return len(self.stacks)
@@ -126,9 +138,10 @@ class LorealSequenceDataset(Dataset):
         if self.patch_size is not None:
             H, W = stack.shape[-2:]
             ph, pw = self.patch_size
-            top = torch.randint(0, H - ph + 1, (1,)).item()
-            left = torch.randint(0, W - pw + 1, (1,)).item()
-            stack = stack[:, top:top+ph, left:left+pw]
+            if H >= ph and W >= pw:
+                top = torch.randint(0, H - ph + 1, (1,)).item()
+                left = torch.randint(0, W - pw + 1, (1,)).item()
+                stack = stack[:, top : top + ph, left : left + pw]
 
         if self.transform:
             stack = self.transform(stack)

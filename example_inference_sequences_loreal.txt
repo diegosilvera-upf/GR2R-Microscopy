@@ -1,0 +1,7 @@
+# One sequence per line. Use either:
+#   Full path to the .tif_dir folder
+#   Folder name only (resolved with --loreal-data-dir)
+#
+# Examples:
+# HF1_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir
+# 057
