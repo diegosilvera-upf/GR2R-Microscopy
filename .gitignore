@@ -11,14 +11,15 @@ verification_output_2.txt
 verification_output_1.txt
 tmp
 sequences_left_out.txt
-gitignore
 sequences_left_out_local.txt
-fmdd_split.txt
 demo_test_poisson.ipynb
 demo_test_poisson_modified4FMDD.ipynb
 demo_test_gaussian.ipynb
 demo_test_gamma.ipynb
 comparison.png
+demo_test_poisson.ipynb
+demo_test_gaussian.ipynb
+demo_test_gamma.ipynb
 demo_test_poisson.ipynb
 demo_test_gaussian.ipynb
 demo_test_gamma.ipynb

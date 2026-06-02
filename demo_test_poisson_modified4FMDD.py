@@ -60,12 +60,8 @@ def train_model(args):
     print(f"Starting training on {device} with {args.loss} loss...")
     
     # 1. Setup Noise and Physics
-    noise_model = dinv.physics.PoissonNoise(args.noise, normalize=True) #normalize=True para multiplicar por la ganancia
-    # DRUNet uses sigma as a noise level input (concatenated noise level map).
-    # For Poisson noise with gain=args.noise on data in [0,1]:
-    # Var[y] = x * args.noise  → sigma_eff(x=0.5) = sqrt(0.5 * args.noise) ≈ 0.044
-    # The original code used sigma=args.noise (≈0.004), which is 10x too small.
-    noise_model.sigma = (0.5 * args.noise) ** 0.5
+    noise_model = dinv.physics.PoissonNoise(args.gamma)
+    noise_model.sigma = args.gamma # Robado del notebook, no lo entiendo la verdad. 
     physics = dinv.physics.Denoising(noise_model=noise_model)
 
     # 2. Setup Datasets
@@ -90,11 +86,11 @@ def train_model(args):
     
     # num_frames=1 for 2D DRUNet
     train_dataset = FMDDataset(sequence_info=train_seq, patch_size=(args.patch_size, args.patch_size), 
-                                mode='synthetic', gamma=1.0/args.noise, data_scale=args.data_scale, 
-                                num_frames=1, transform=transform) #gamma=1.0/args.noise??? POSIBLE ERROR
-    test_dataset = FMDDataset(sequence_info=test_seq, mode='synthetic', 
-                               gamma=1.0/args.noise, data_scale=args.data_scale, 
-                               num_frames=1) #gamma=1.0/args.noise??? POSIBLE ERROR
+                                mode='clean', data_scale=args.data_scale, 
+                                num_frames=1, transform=transform)
+    test_dataset = FMDDataset(sequence_info=test_seq, mode='clean', 
+                               data_scale=args.data_scale, 
+                               num_frames=1)
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     
@@ -120,12 +116,17 @@ def train_model(args):
         epoch_loss = 0
         pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
         
-        for y_stack, y in pbar:
-            # y_stack has shape [B, 1, H, W] for DRUNet (num_frames=1)
-            y_stack, y = y_stack.to(device), y.to(device)
+        for x_clean_stack, x_clean in pbar:
+            # x_clean_stack/x_clean tienen forma [B, 1, H, W] — imágenes limpias del GT
+            x_clean_stack, x_clean = x_clean_stack.to(device), x_clean.to(device)
+            # x_clean_stack[:, 0:1] es el único frame limpio (num_frames=1)
+            x_clean_img = x_clean_stack[:, 0:1, :, :]
             optimizer.zero_grad()
             
-            # Forward pass with update_parameters=True to store corruption for R2R
+            # Aplicar ruido Poisson via physics: y ~ Poisson(x_clean * gamma) / gamma
+            y = physics(x_clean_img)
+            
+            # Forward pass con update_parameters=True para que R2R almacene la corrupción
             x_est = model(y, physics, update_parameters=True)
             
             # Compute loss
@@ -135,7 +136,7 @@ def train_model(args):
             optimizer.step()
             
             epoch_loss += loss.item()
-            pbar.set_postfix({"loss": loss.item()})
+            pbar.set_postfix({"loss": loss.item()}) #Es la barrita que muestra la loss en tiempo real
 
         # 6. Evaluation
         model.eval()
@@ -145,18 +146,20 @@ def train_model(args):
         n_eval = min(len(test_dataset), 10)
         with torch.no_grad():
             for i in range(n_eval):
-                y_stack, x_gt = test_dataset[i]
-                y_stack, x_gt = y_stack.unsqueeze(0).to(device), x_gt.unsqueeze(0).to(device)
+                x_clean_stack, x_clean = test_dataset[i]
+                x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
+                x_gt = x_clean.unsqueeze(0).to(device)
                 
-                # y_stack[:, 0:1, :, :] is the only frame
-                y_noisy = y_stack[:, 0:1, :, :].clone()
+                # x_clean_stack[:, 0:1, :, :] es el único frame limpio
+                x_clean_img = x_clean_stack[:, 0:1, :, :]
+                # Aplicar ruido Poisson via physics para obtener la observación ruidosa
+                y_noisy = physics(x_clean_img)
                 
                 # Forward pass for PSNR
                 x_est = model(y_noisy, physics)
                 current_psnr += PSNR()(x=x_gt, x_net=x_est).item()
                 
-                # Forward pass for loss (R2R needs update_parameters=True and model.training=True to update internal state)
-                # We use a trick: set .training=True only on the wrapper to avoid BN corruption in the base model
+                # Forward pass for val loss (R2R necesita update_parameters=True)
                 model.training = True 
                 x_est_loss = model(y_noisy, physics, update_parameters=True)
                 loss_val = criterion(x_est_loss, y_noisy, physics, model)
@@ -194,9 +197,12 @@ def train_model(args):
     with torch.no_grad():
         for i in [0, 1, 2]: # Samples from test set
             if i >= len(test_dataset): break
-            y_stack, x_gt = test_dataset[i]
-            y_stack, x_gt = y_stack.unsqueeze(0).to(device), x_gt.unsqueeze(0).to(device)
-            y_noisy = y_stack[:, 0:1, :, :].clone()
+            x_clean_stack, x_clean = test_dataset[i]
+            x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
+            x_gt = x_clean.unsqueeze(0).to(device)
+            x_clean_img = x_clean_stack[:, 0:1, :, :]
+            # Generamos la observación ruidosa con physics (igual que en entrenamiento)
+            y_noisy = physics(x_clean_img)
             
             x_est = model(y_noisy, physics)
             
@@ -208,10 +214,10 @@ def train_model(args):
 
 class Args:
     loss = "gr2r_mse"
-    noise = 1/255.0
+    gamma = 1/255.0
     alpha = 0.15
-    epochs = 20
-    batch_size = 32 # Normalized batch size
+    epochs = 100
+    batch_size = 16 # Normalized batch size
     lr = 1e-4
     patch_size = 256
     data_scale = 1.0 # Dataset now handles normalization to [0, 1]

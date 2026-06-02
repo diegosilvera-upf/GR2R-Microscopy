@@ -284,7 +284,10 @@ class FMDDataset(Dataset):
         """
         Dataset para FMDD:
         - Soporta imágenes .png
-        - mode: 'raw' (usa imágenes reales ruidosas) o 'synthetic' (usa GT + ruido Poisson)
+        - mode:
+            'raw'       → usa imágenes reales ruidosas del dataset
+            'synthetic' → usa GT + ruido Poisson generado internamente por el dataset
+            'clean'     → devuelve solo la GT limpia (sin ruido); el ruido lo aplica physics externamente
         - gamma: Ganancia para el ruido de Poisson sintético (solo en mode='synthetic')
         - num_frames: Número de frames en el stack (5 para FastDVDnet, 1 para DRUNet)
         """
@@ -312,6 +315,12 @@ class FMDDataset(Dataset):
                     # En modo sintético, cada "stack" se genera desde la misma GT
                     # Podemos añadir múltiples entradas por secuencia para aumentar el dataset
                     # por ejemplo, 55 stacks por imagen GT para llegar a ~12000 parches
+                    for _ in range(55):
+                        self.stacks.append((None, gt))
+            elif self.mode == 'clean':
+                if gt:
+                    # En modo clean solo devolvemos el GT. El ruido lo aplica physics externamente.
+                    # Múltiples entradas por GT para aumentar el dataset (como en synthetic).
                     for _ in range(55):
                         self.stacks.append((None, gt))
 
@@ -379,6 +388,26 @@ class FMDDataset(Dataset):
             else:
                 target = target_full
 
+        elif self.mode == 'clean':
+            # Devuelve solo la imagen GT limpia. El ruido lo aplica physics externamente.
+            clean_full = self._read_png(gt_path)
+
+            if self.patch_size is not None:
+                H, W = clean_full.shape[1:]
+                ph, pw = self.patch_size
+                if H >= ph and W >= pw:
+                    top = torch.randint(0, H - ph + 1, (1,)).item()
+                    left = torch.randint(0, W - pw + 1, (1,)).item()
+                    clean_patch = clean_full[:, top:top + ph, left:left + pw]
+                else:
+                    clean_patch = clean_full
+            else:
+                clean_patch = clean_full
+
+            # stack y target son ambos la imagen limpia; el training loop añadirá el ruido
+            stack = clean_patch.expand(self.num_frames, -1, -1).clone()  # [num_frames,H,W]
+            target = clean_patch
+
         else: # synthetic
             # Cargar la imagen GT una sola vez
             clean_full = self._read_png(gt_path)
@@ -397,7 +426,6 @@ class FMDDataset(Dataset):
                 clean_patch = clean_full
 
             # Añadir ruido SOLO al fragmento recortado (Mucha menos CPU!)
-            print(clean_patch.min(), clean_patch.max())
             frames = [self._add_poisson_noise(clean_patch) for _ in range(self.num_frames)]
             stack = torch.cat(frames, dim=0)
             target = clean_patch
@@ -406,7 +434,7 @@ class FMDDataset(Dataset):
         stack = self.make_divisible_by_4(stack)
         stack = linear_transform(stack, self.a, self.b, u=1) / self.data_scale
         stack = torch.clamp(stack, min=0.0)
-        print(stack.min(), stack.max())
+        #print(stack.min(), stack.max())
 
         target = self.make_divisible_by_4(target)
         target = linear_transform(target, self.a, self.b, u=1) / self.data_scale
