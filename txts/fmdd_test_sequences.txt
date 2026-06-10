@@ -1,0 +1,12 @@
+TwoPhoton_BPAE_R/1
+TwoPhoton_BPAE_G/1
+TwoPhoton_BPAE_B/1
+TwoPhoton_MICE/1
+Confocal_MICE/1
+Confocal_BPAE_R/1
+Confocal_BPAE_G/1
+Confocal_BPAE_B/1
+Confocal_FISH/1
+WideField_BPAE_R/1
+WideField_BPAE_G/1
+WideField_BPAE_B/1

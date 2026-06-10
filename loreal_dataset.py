@@ -4,24 +4,18 @@ import tifffile
 from pathlib import Path
 from torch.utils.data import Dataset
 import imageio.v3 as iio
-
-# ----------------------------------------------------------------------------------
-# Utilities
-# ----------------------------------------------------------------------------------
-def linear_transform(x, a, b, u=1):
-    """Linear transform from pre-processing.txt"""
-    return a * x + u * b
+# from loreal_utils import linear_transform
 
 # ----------------------------------------------------------------------------------
 # Loreal Dataset Discovery and Classes
 # ----------------------------------------------------------------------------------
 
-def get_valid_sequences(sequence_paths, out_file="sequences_left_out_local.txt"):
+def get_valid_sequences(sequence_paths, out_file_invalid="sequences_left_out.txt", out_file_valid="sequences_used.txt"):
     """
     Filters sequences based on pre-processing.txt and minimum frame count.
     """
     valid_sequences = []
-    with open(out_file, "w") as f_out:
+    with open(out_file_invalid, "w") as f_invalid, open(out_file_valid, "w") as f_valid:
         for seq in sequence_paths:
             seq = Path(seq)
             if not seq.is_dir():
@@ -29,7 +23,7 @@ def get_valid_sequences(sequence_paths, out_file="sequences_left_out_local.txt")
             
             preproc_file = seq / "pre-processing.txt"
             if not preproc_file.exists():
-                f_out.write(f"{seq.name}, no pre-processing.txt file\n")
+                f_invalid.write(f"{seq.name}, no pre-processing.txt file\n")
                 continue
             
             try:
@@ -40,11 +34,11 @@ def get_valid_sequences(sequence_paths, out_file="sequences_left_out_local.txt")
                 else:
                     a, b = params.flatten()[0], params.flatten()[1]
             except Exception as e:
-                f_out.write(f"{seq.name}, error reading pre-processing.txt: {e}\n")
+                f_invalid.write(f"{seq.name}, error reading pre-processing.txt: {e}\n")
                 continue
 
             if np.abs(a-1) > 0.2:
-                f_out.write(f"{seq.name}, a={a}\n")
+                f_invalid.write(f"{seq.name}, a={a}\n")
                 continue
             
             tif_files = sorted(seq.glob("*.tif"))
@@ -64,8 +58,9 @@ def get_valid_sequences(sequence_paths, out_file="sequences_left_out_local.txt")
             
             if has_enough_frames:
                 valid_sequences.append((str(seq), float(a), float(b)))
+                f_valid.write(f"{seq.name}, a={a}, b={b}\n")
             else:
-                f_out.write(f"{seq.name}, not enough frames (min 5)\n")
+                f_invalid.write(f"{seq.name}, not enough frames (min 5)\n")
                 
     return sorted(valid_sequences)
 
@@ -132,7 +127,8 @@ class LorealSequenceDataset(Dataset):
         stack = torch.cat(frames, dim=0)
         
         stack = self.make_divisible_by_4(stack)
-        stack = linear_transform(stack, a, b, u=1) / self.data_scale
+        # stack = linear_transform(stack, a, b, u=1) / self.data_scale
+        stack = stack / self.data_scale
         stack = torch.clamp(stack, min=0.0)
 
         if self.patch_size is not None:
