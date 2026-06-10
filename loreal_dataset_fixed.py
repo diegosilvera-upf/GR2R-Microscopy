@@ -184,7 +184,8 @@ class FastDVDnetDataset(Dataset):
         stack = self.make_divisible_by_4(stack)
         
         # Valery's linear transform / data_scale
-        stack = linear_transform(stack, a, b, u=1) / self.data_scale # u=1 para los nuevos pesos que me pasó Valéry
+        # stack = linear_transform(stack, a, b, u=1) / self.data_scale # u=1 para los nuevos pesos que me pasó Valéry
+        stack = stack / self.data_scale
         stack = torch.clamp(stack, min=0.0)
 
         # Random crop
@@ -433,12 +434,14 @@ class FMDDataset(Dataset):
 
         # Normalización común
         stack = self.make_divisible_by_4(stack)
-        stack = linear_transform(stack, self.a, self.b, u=1) / self.data_scale
+        # stack = linear_transform(stack, self.a, self.b, u=1) / self.data_scale
+        stack = stack / self.data_scale
         stack = torch.clamp(stack, min=0.0)
         #print(stack.min(), stack.max())
 
         target = self.make_divisible_by_4(target)
-        target = linear_transform(target, self.a, self.b, u=1) / self.data_scale
+        # target = linear_transform(target, self.a, self.b, u=1) / self.data_scale
+        target = target / self.data_scale
         target = torch.clamp(target, min=0.0)
 
         # Aplicar transformación (ej: D4) a AMBOS para mantener consistencia

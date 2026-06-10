@@ -72,7 +72,7 @@ def build_eval_cache(test_dataset, physics, n_eval, device, seed):
             x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
             x_gt = x_clean.unsqueeze(0).to(device)
             x_clean_img = x_clean_stack[:, 0:1, :, :]
-            y_noisy = physics(x_clean_img)
+            y_noisy = physics(x_clean_img) #Acá es donde agrego ruido sintético
             cache.append((x_gt.detach().cpu(), y_noisy.detach().cpu()))
 
     torch.set_rng_state(cpu_state)
@@ -130,7 +130,7 @@ def train_model(args):
     print(f"Found {len(sequences)} sequences.")
 
     # Split into train/test using explicit TXT file
-    SPLIT_FILE = "fmdd_split.txt"
+    SPLIT_FILE = "txts/fmdd_split.txt"
     train_seq, test_seq, visualize_indices = get_fmdd_split_from_file(sequences, SPLIT_FILE)
     print(f"Split loaded from {SPLIT_FILE}: {len(train_seq)} train, {len(test_seq)} test sequences.")
 
@@ -239,21 +239,23 @@ def train_model(args):
         f.write(f"weights_path={best_ckpt_path}\n")
 
     # 6.5 Plot Losses
-    plt.figure(figsize=(10, 5))
-    plt.plot(range(1, args.epochs + 1), train_losses, label="Train Loss")
-    plt.plot(range(1, args.epochs + 1), val_losses, label="Val Loss")
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+    ax1.plot(range(1, args.epochs + 1), train_losses, label="Train Loss")
+    ax1.plot(range(1, args.epochs + 1), val_losses, label="Val Loss")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
     if len(val_psnrs) == args.epochs:
-        ax2 = plt.gca().twinx()
+        ax2 = ax1.gca().twinx()
         ax2.plot(range(1, args.epochs + 1), val_psnrs, "g--", label="Val PSNR (dB)")
         ax2.set_ylabel("Val PSNR (dB)")
-        ax2.legend(loc="lower right")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training and Validation Loss")
-    plt.legend()
-    plt.grid(True)
+        ax1.legend(loc="upper left")
+        ax2.legend(loc="upper right")
+    else:
+        ax1.legend()
+    ax1.set_title("Training and Validation Loss")
+    ax1.grid(True)
     loss_plot_path = output_dir / f"loss_plot.png"
-    plt.savefig(loss_plot_path)
+    fig.savefig(loss_plot_path)
     print(f"Loss plot saved to {loss_plot_path}")
 
     # 7. Save final result as TIF (using best-epoch weights)

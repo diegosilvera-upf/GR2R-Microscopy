@@ -1,18 +1,22 @@
 r"""
-Inference-only script: load GR2R/DRUNet weights and denoise sequences listed in a .txt file.
+Inference-only script: load GR2R/FastDVDNet weights and denoise sequences listed in a .txt file.
+
+FastDVDNet processes 5-frame sliding windows. The central frame (position 2) is denoised
+using its 2 temporal neighbors on each side. As a result, the first and last 2 frames of
+each sequence are not covered.
 
 Example:
-  python run_inference_on_sequences.py \
-    --weights results/denoising-poisson-fmdd-drunet/tif_output_2026_06_01-19_33_02/best_model.pth \
-    --dataset fmdd \
-    --sequences my_fmdd_sequences.txt \
-    --fmdd-root ../data/FMDD
-
-  python run_inference_on_sequences.py \
-    --weights results/denoising-poisson-loreal-drunet-from-fmdd/tif_output_.../best_model.pth \
+  python run_inference_on_sequences_fastdvdnet.py \
+    --weights results/denoising-poisson-loreal-fastdvdnet-retry/tif_output_.../best_model.pth \
     --dataset loreal \
     --sequences my_loreal_sequences.txt \
     --loreal-data-dir /path/to/sequences_almost_Poisson
+
+  python run_inference_on_sequences_fastdvdnet.py \
+    --weights results/denoising-poisson-fmdd-fastdvdnet-retry/tif_output_.../best_model.pth \
+    --dataset fmdd \
+    --sequences my_fmdd_sequences.txt \
+    --fmdd-root ../data/FMDD
 """
 
 from __future__ import annotations
@@ -29,17 +33,41 @@ import tifffile
 import torch
 from deepinv.loss import PSNR, R2RLoss, SSIM
 from tqdm import tqdm
-# from loreal_dataset import linear_transform
+
+from loreal_dataset import LorealSequenceDataset
 from loreal_dataset_fixed import get_fmdd_sequences
+from models_FastDVDnet_sans_noise_map import FastDVDnet
 
 BASE_DIR = Path(".")
-DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "inference"
+DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "inference_fastdvdnet"
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 
 
 # ---------------------------------------------------------------------------
-# Sequence list parsing
+# Wrapper (same as in training scripts)
+# ---------------------------------------------------------------------------
+
+
+class FastDVDNetContextWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self._context = None
+
+    def set_context(self, stack):
+        self._context = stack.detach()
+
+    def forward(self, y_central, physics=None, **kwargs):
+        if self._context is None:
+            raise RuntimeError("Call set_context(stack) before forward pass.")
+        stack = self._context.clone()
+        stack[:, 2:3, :, :] = y_central
+        return self.model(stack)
+
+
+# ---------------------------------------------------------------------------
+# Sequence list parsing  (identical to run_inference_on_sequences.py)
 # ---------------------------------------------------------------------------
 
 
@@ -65,7 +93,6 @@ def _load_preprocessing(path: Path) -> tuple[float, float]:
 
 
 def resolve_loreal_sequence(line: str, loreal_data_dir: Path | None) -> tuple[str, float, float]:
-    """Return (seq_path, a, b) for one Loreal sequence entry."""
     candidate = Path(line)
     if not candidate.is_absolute() and loreal_data_dir is not None:
         by_name = loreal_data_dir / line
@@ -101,7 +128,6 @@ def _build_fmdd_dict(root: Path, modality: str, seq_id: str) -> dict:
 
 
 def resolve_fmdd_sequence(line: str, fmdd_root: Path) -> dict:
-    """Return FMDD sequence dict (same format as get_fmdd_sequences)."""
     p = Path(line)
     if p.is_dir():
         parts = p.parts
@@ -126,7 +152,6 @@ def resolve_fmdd_sequence(line: str, fmdd_root: Path) -> dict:
     if p.exists() and p.is_file():
         raise ValueError(f"Expected a directory for FMDD sequence, got file: {p}")
 
-    # Fallback: match against discovered sequences (slower but forgiving)
     key = line.strip()
     for seq in get_fmdd_sequences(fmdd_root):
         if f"{seq['modality']}/{seq['seq_id']}" == key:
@@ -155,14 +180,12 @@ def parse_params_file(params_path: Path) -> dict[str, str]:
 
 
 def build_model(noise: float, alpha: float) -> torch.nn.Module:
-    backbone = dinv.models.DRUNet(
-        in_channels=1, out_channels=1, pretrained=None, nc=[16, 32, 64, 128]
-    )
-    model = dinv.models.ArtifactRemoval(backbone).to(device)
+    base = FastDVDnet(num_input_frames=5)
+    wrapper = FastDVDNetContextWrapper(base).to(device)
     noise_model = dinv.physics.PoissonNoise(noise)
     noise_model.sigma = noise
     criterion = R2RLoss(noise_model=noise_model, alpha=alpha)
-    return criterion.adapt_model(model)
+    return criterion.adapt_model(wrapper)
 
 
 def load_weights(model: torch.nn.Module, weights_path: Path) -> None:
@@ -176,10 +199,10 @@ def load_weights(model: torch.nn.Module, weights_path: Path) -> None:
         print(f"WARNING: unexpected keys when loading weights: {len(unexpected)}")
 
 
-
-def crop_div16(tensor: torch.Tensor) -> torch.Tensor:
+def crop_div4(tensor: torch.Tensor) -> torch.Tensor:
+    """FastDVDNet needs H and W divisible by 4 (2 downsampling levels)."""
     h, w = tensor.shape[-2:]
-    return tensor[..., : (h // 16) * 16, : (w // 16) * 16]
+    return tensor[..., :(h // 4) * 4, :(w // 4) * 4]
 
 
 def read_png_tensor(path: Path) -> torch.Tensor:
@@ -218,21 +241,27 @@ def run_fmdd_clean(
     save_noisy: bool,
     save_clean: bool,
 ) -> dict | None:
-    """One GT frame + synthetic Poisson noise (matches FMDD training eval)."""
+    """GT + 5 independent synthetic Poisson noisy frames. Denoise central frame."""
     gt_path = seq.get("gt")
     if not gt_path or not Path(gt_path).exists():
         print(f"  SKIP {seq['modality']}/{seq['seq_id']}: no GT (avg50.png)")
         return None
 
     x_clean = read_png_tensor(Path(gt_path)).unsqueeze(0).to(device)
-    x_clean = crop_div16(x_clean)
-    y_noisy = physics(x_clean)
-    x_est = model(y_noisy, physics)
+    x_clean = crop_div4(x_clean)
+
+    # Apply physics 5 times independently → 5 noisy realizations of the same GT
+    noisy_frames = [physics(x_clean) for _ in range(5)]
+    stack_noisy = torch.cat(noisy_frames, dim=1)  # (1, 5, H, W)
+    y_central = stack_noisy[:, 2:3, :, :]
+
+    model.model.set_context(stack_noisy)
+    x_est = model(y_central, physics)
 
     tag = f"{seq['modality']}_{seq['seq_id']}".replace("/", "_")
     tifffile.imwrite(str(output_dir / f"{tag}_denoised.tif"), x_est.squeeze().cpu().numpy().astype(np.float32))
     if save_noisy:
-        tifffile.imwrite(str(output_dir / f"{tag}_noisy.tif"), y_noisy.squeeze().cpu().numpy().astype(np.float32))
+        tifffile.imwrite(str(output_dir / f"{tag}_noisy.tif"), y_central.squeeze().cpu().numpy().astype(np.float32))
     if save_clean:
         tifffile.imwrite(str(output_dir / f"{tag}_clean.tif"), x_clean.squeeze().cpu().numpy().astype(np.float32))
 
@@ -253,32 +282,38 @@ def run_fmdd_raw(
     frame_stride: int,
     save_noisy: bool,
 ) -> None:
-    """Denoise real noisy PNG frames from FMDD raw folder."""
+    """Sliding window of 5 real noisy PNGs. Denoise central frame of each window."""
     frames = seq["frames"]
-    if not frames:
-        print(f"  SKIP {seq['modality']}/{seq['seq_id']}: no raw frames")
+    mid = 2
+    if len(frames) < 5:
+        print(f"  SKIP {seq['modality']}/{seq['seq_id']}: fewer than 5 frames")
         return
 
-    indices = list(range(0, len(frames), frame_stride))
+    center_indices = list(range(mid, len(frames) - mid, frame_stride))
     if max_frames is not None:
-        indices = indices[:max_frames]
+        center_indices = center_indices[:max_frames]
 
     denoised_list = []
     noisy_list = []
-    for i in tqdm(indices, desc=f"raw {seq['modality']}/{seq['seq_id']}", leave=False):
-        y = read_png_tensor(Path(frames[i])).unsqueeze(0).to(device)
-        y = crop_div16(y)
-        x_est = model(y, physics)
+    for i in tqdm(center_indices, desc=f"raw {seq['modality']}/{seq['seq_id']}", leave=False):
+        window = [read_png_tensor(Path(frames[j])).unsqueeze(0).to(device)
+                  for j in range(i - mid, i + mid + 1)]
+        stack = torch.cat(window, dim=1)  # (1, 5, H, W)
+        stack = crop_div4(stack)
+        y_central = stack[:, 2:3, :, :]
+
+        model.model.set_context(stack)
+        x_est = model(y_central, physics)
         denoised_list.append(x_est.squeeze().cpu().numpy().astype(np.float32))
         if save_noisy:
-            noisy_list.append(y.squeeze().cpu().numpy().astype(np.float32))
+            noisy_list.append(y_central.squeeze().cpu().numpy().astype(np.float32))
 
     tag = f"{seq['modality']}_{seq['seq_id']}".replace("/", "_")
-    stack = np.stack(denoised_list, axis=0)
-    tifffile.imwrite(str(output_dir / f"{tag}_denoised.tif"), stack)
+    stack_out = np.stack(denoised_list, axis=0)
+    tifffile.imwrite(str(output_dir / f"{tag}_denoised.tif"), stack_out)
     if save_noisy and noisy_list:
         tifffile.imwrite(str(output_dir / f"{tag}_noisy.tif"), np.stack(noisy_list, axis=0))
-    print(f"  Saved {tag}_denoised.tif shape={stack.shape}")
+    print(f"  Saved {tag}_denoised.tif shape={stack_out.shape}")
 
 
 @torch.no_grad()
@@ -294,29 +329,38 @@ def run_loreal_sequence(
     frame_stride: int,
     save_noisy: bool,
 ) -> None:
-    seq_dir = Path(seq_path)
-    tif_files = sorted(seq_dir.glob("*.tif"))
-    indices = list(range(0, len(tif_files), frame_stride))
+    """Sliding window of 5 real Loreal TIF frames. Denoise central frame of each window.
+    LorealSequenceDataset handles divisibility-by-4 and normalization internally.
+    Note: first and last 2 frames of each sequence are not covered by the sliding window."""
+    seq_ds = LorealSequenceDataset(
+        sequence_info=[(seq_path, a, b)],
+        num_frames=5,
+        data_scale=data_scale,
+    )
+    if len(seq_ds) == 0:
+        print(f"  SKIP {Path(seq_path).name}: no valid 5-frame windows")
+        return
+
+    indices = list(range(0, len(seq_ds), frame_stride))
     if max_frames is not None:
         indices = indices[:max_frames]
 
     denoised_frames = []
     noisy_frames = []
-    seq_name = seq_dir.name.replace("/", "_")
+    seq_name = Path(seq_path).name
 
     for i in tqdm(indices, desc=seq_name, leave=False):
-        img = tifffile.imread(str(tif_files[i])).astype(np.float32)
-        y = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).to(device)
-        # y = linear_transform(y, a, b, u=1) / data_scale
-        y = y / data_scale
-        y = torch.clamp(y, min=0.0)
-        y = crop_div16(y)
-        x_est = model(y, physics)
-        # x_est_orig = linear_transform(x_est * data_scale, a, b, u=1, inverse=True)
+        y_stack, y_central = seq_ds[i]
+        y_stack = y_stack.unsqueeze(0).to(device)
+        y_central = y_central.unsqueeze(0).to(device)
+
+        model.model.set_context(y_stack)
+        x_est = model(y_central, physics)
+
         x_est_orig = x_est * data_scale
         denoised_frames.append(x_est_orig.squeeze().cpu().numpy().astype(np.float32))
         if save_noisy:
-            noisy_frames.append(y.squeeze().cpu().numpy().astype(np.float32))
+            noisy_frames.append((y_central * data_scale).squeeze().cpu().numpy().astype(np.float32))
 
     denoised_stack = np.stack(denoised_frames, axis=0)
     tifffile.imwrite(str(output_dir / f"{seq_name}_denoised.tif"), denoised_stack)
@@ -354,7 +398,7 @@ def apply_params_from_checkpoint_dir(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run inference with saved GR2R weights on a custom sequence list."
+        description="Run inference with saved GR2R/FastDVDNet weights on a custom sequence list."
     )
     parser.add_argument("--weights", type=Path, required=True, help="Path to .pth state dict")
     parser.add_argument(
@@ -367,13 +411,13 @@ def main() -> None:
         "--sequences",
         type=Path,
         required=True,
-        help="Text file with one sequence per line (see module docstring)",
+        help="Text file with one sequence per line",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
-        help="Output folder (default: results/inference/<dataset>_<timestamp>)",
+        help="Output folder (default: results/inference_fastdvdnet/<dataset>_<timestamp>)",
     )
     parser.add_argument("--fmdd-root", type=Path, default=Path("../data/FMDD"))
     parser.add_argument(
@@ -386,7 +430,7 @@ def main() -> None:
         "--fmdd-mode",
         choices=["clean", "raw"],
         default="clean",
-        help="FMDD: 'clean' = GT+Poisson (training-style); 'raw' = real noisy PNGs",
+        help="FMDD: 'clean' = GT+5 synthetic Poisson frames; 'raw' = 5-frame sliding window on real PNGs",
     )
     parser.add_argument("--noise", type=float, default=None, help="Poisson noise level (default: 1/255)")
     parser.add_argument("--alpha", type=float, default=0.15, help="GR2R alpha used at training")
@@ -395,13 +439,13 @@ def main() -> None:
         "--max-frames",
         type=int,
         default=None,
-        help="Max frames per sequence (raw/loreal). Omit for all frames.",
+        help="Max frames to denoise per sequence. Omit for all frames.",
     )
     parser.add_argument(
         "--frame-stride",
         type=int,
         default=1,
-        help="Process every N-th frame (speed up long sequences)",
+        help="Process every N-th sliding window (speeds up long sequences)",
     )
     parser.add_argument("--no-save-noisy", action="store_true")
     parser.add_argument("--no-save-clean", action="store_true", help="FMDD clean mode only")
@@ -455,13 +499,8 @@ def main() -> None:
                     print(f"  PSNR={row['psnr']:.2f} dB  SSIM={row['ssim']:.4f}")
             else:
                 run_fmdd_raw(
-                    model,
-                    physics,
-                    seq,
-                    output_dir,
-                    args.max_frames,
-                    args.frame_stride,
-                    save_noisy,
+                    model, physics, seq, output_dir,
+                    args.max_frames, args.frame_stride, save_noisy,
                 )
     else:
         loreal_seqs = [
@@ -472,16 +511,8 @@ def main() -> None:
         for seq_path, a, b in loreal_seqs:
             print(f"Processing Loreal {Path(seq_path).name}...")
             run_loreal_sequence(
-                model,
-                physics,
-                seq_path,
-                a,
-                b,
-                output_dir,
-                data_scale,
-                args.max_frames,
-                args.frame_stride,
-                save_noisy,
+                model, physics, seq_path, a, b, output_dir,
+                data_scale, args.max_frames, args.frame_stride, save_noisy,
             )
 
     if metrics_rows:

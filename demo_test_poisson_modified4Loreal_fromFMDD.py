@@ -129,10 +129,12 @@ def load_loreal_split(valid_sequences, split_file, val_prefixes=None, test_prefi
 
 def _to_model_input(y_stack):
     """Map Loreal dataset output [B, num_frames, H, W] to DRUNet input [B, 1, H, W]."""
-    return y_stack[:, 0:1, :, :]
+    return y_stack[:, 0:1, :, :] #Devuelve el primer frame de la secuencia
+                                 #Para el caso de num_frames=1, es lo mismo que devolver y_stack
+                                 #Pero para el caso de num_frames=5, debería cambiarlo a y_stack[:, 2:3, :, :]
 
 
-def evaluate_val_loss(model, val_loader, criterion, physics):
+def evaluate_val_loss(model, val_loader, criterion, physics, eval_seed):
     model.eval()
     running = 0.0
     n_batches = 0
@@ -141,6 +143,10 @@ def evaluate_val_loss(model, val_loader, criterion, physics):
         for y_stack, _ in val_loader:
             y_stack = y_stack.to(device)
             y = _to_model_input(y_stack)
+
+            torch.manual_seed(eval_seed + n_batches)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(eval_seed + n_batches)
 
             model.training = True
             x_est = model(y, physics, update_parameters=True)
@@ -207,7 +213,7 @@ def train_model(args):
     # 1) Physics and noise settings
     noise_model = dinv.physics.PoissonNoise(args.noise)
     noise_model.sigma = args.noise
-    physics = dinv.physics.Denoising(noise_model=noise_model)
+    physics = dinv.physics.Denoising(noise_model=noise_model) #Defino el operador de degradación, pero no lo uso para agregar ruido
 
     # 2) Sequence discovery and split
     sequence_paths = sorted(DATA_DIR.glob("*"))
@@ -277,9 +283,9 @@ def train_model(args):
     # 4) Model and objective
     model = dinv.models.ArtifactRemoval(
         dinv.models.DRUNet(in_channels=1, out_channels=1, pretrained=None, nc=[16, 32, 64, 128])
-    ).to(device)
+    ).to(device) #pretrained=None es para que no descargue los pesos de huggingface
 
-    if args.pretrained_ckpt:
+    if args.pretrained_ckpt: #Este es mi checkpoint, no es el de huggingface
         ckpt_path = Path(args.pretrained_ckpt)
         if ckpt_path.exists():
             print(f"Loading pre-trained weights from {ckpt_path}")
@@ -328,7 +334,7 @@ def train_model(args):
             pbar.set_postfix({"train_loss": f"{loss.item():.5f}"})
 
         train_loss_epoch = running_train / max(len(train_loader), 1)
-        val_loss_epoch = evaluate_val_loss(model, val_loader, criterion, physics)
+        val_loss_epoch = evaluate_val_loss(model, val_loader, criterion, physics, args.eval_seed)
 
         train_losses.append(train_loss_epoch)
         val_losses.append(val_loss_epoch)
@@ -345,6 +351,11 @@ def train_model(args):
                 f"New best model saved to {best_ckpt_path} "
                 f"(epoch={best_epoch}, val_loss={best_val_loss:.6f})"
             )
+
+        if (epoch + 1) % args.checkpoint_every == 0:
+            periodic_path = output_dir / f"model_epoch{epoch + 1}.pth"
+            torch.save(model.state_dict(), periodic_path)
+            print(f"Periodic checkpoint saved: {periodic_path}")
 
     # 6) Save loss plot
     plt.figure(figsize=(10, 5))
@@ -381,17 +392,19 @@ class Args:
     noise = 1 / 255.0
     alpha = 0.15
 
-    epochs = 20
+    epochs = 40
     batch_size = 16
     val_batch_size = 16
-    lr = .5e-5
+    lr = 1e-4
     patch_size = 256
     data_scale = 255.0
     num_workers = 4
     repeats_per_frame = 10
+    eval_seed = 43
+    checkpoint_every = 10
 
     # Optional transfer learning from FMDD
-    pretrained_ckpt = "ckpts/denoising-poisson-fmdd-drunet/best_model.pth"
+    pretrained_ckpt = "results/denoising-poisson-fmdd-drunet/tif_output_2026_06_02-19_42_17/best_model.pth"
 
     # Used only when loreal_split.txt is missing
     val_prefixes = ["HF1_", "Mela1_"]
