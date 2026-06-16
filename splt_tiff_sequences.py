@@ -51,7 +51,7 @@ def split_tiff_sequences(input_dir, output_dir):
 
 if __name__ == "__main__":
 
-    input_dir = "results/inference_fastdvdnet/loreal_2026_06_10-14_15_41"
-    output_dir = "results/inference_fastdvdnet/loreal_2026_06_10-14_15_41splitted"
+    input_dir = "results/inference_fastdvdnet/loreal_2026_06_14-12_33_12"
+    output_dir = "results/inference_fastdvdnet/loreal_2026_06_14-12_33_12_splitted"
 
     split_tiff_sequences(input_dir, output_dir)

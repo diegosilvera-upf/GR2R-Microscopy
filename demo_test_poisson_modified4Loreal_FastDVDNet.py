@@ -440,7 +440,7 @@ class Args:
     repeats_per_frame = 10
     eval_seed = 43
     checkpoint_every = 10
-    pretrained_ckpt = None  # path al checkpoint FMDD FastDVDNet para transfer learning
+    pretrained_ckpt = 'FastDVDnet-pure_poisson-a=1-normalization_by_255.pth'# None  # path al checkpoint FMDD FastDVDNet para transfer learning
     val_prefixes = ["HF1_", "Mela1_"]
     test_prefixes = ["HF2_", "Mela2_"]
     max_export_sequences = 2
