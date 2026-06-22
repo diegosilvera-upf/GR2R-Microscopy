@@ -23,7 +23,7 @@ from matplotlib import pyplot as plt
 # Use local fixed dataset utilities
 # from loreal_dataset_fixed import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
 from dataset import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
-from training_utils import FastDVDNetContextWrapper, save_parameters
+from training_utils import FastDVDNetContextWrapper, save_parameters, build_eval_cache
 from models_FastDVDnet_sans_noise_map import FastDVDnet
 
 # ---------------------------------------------------------------
@@ -40,29 +40,6 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 
-#This function is to eval as in demo_test_poisson_modified4FMDD.py
-def build_eval_cache(test_dataset, physics, n_eval, device, seed):
-    cpu_state = torch.get_rng_state()
-    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    cache = []
-    with torch.no_grad():
-        for i in range(n_eval):
-            x_clean_stack, x_clean = test_dataset[i]
-            x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
-            x_gt = x_clean.unsqueeze(0).to(device)
-            noisy_frames = [physics(x_clean_stack[:, j:j+1]) for j in range(5)]
-            stack_noisy = torch.cat(noisy_frames, dim=1)  # (1, 5, H, W)
-            cache.append((x_gt.detach().cpu(), stack_noisy.detach().cpu()))
-
-    torch.set_rng_state(cpu_state)
-    if cuda_states is not None:
-        torch.cuda.set_rng_state_all(cuda_states)
-    print(f"Built eval cache with {len(cache)} fixed noisy samples (seed={seed}).")
-    return cache
 
 #This function is to eval as in demo_test_poisson_modified4FMDD.py
 def evaluate_epoch(model, criterion, physics, eval_cache, device, eval_seed):
@@ -167,7 +144,7 @@ def train_model(args):
     n_eval = len(test_seq)
     if args.n_eval_sequences is not None:
         n_eval = min(len(test_seq), args.n_eval_sequences)
-    eval_cache = build_eval_cache(test_dataset, physics, n_eval, device, args.eval_seed)
+    eval_cache = build_eval_cache(test_dataset, physics, n_eval, device, args.eval_seed, num_frames=5)
 
     
     # 5. Training Loop

@@ -19,7 +19,7 @@ from deepinv.loss import PSNR, SSIM, R2RLoss
 import tifffile
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from training_utils import save_parameters
+from training_utils import save_parameters, build_eval_cache
 
 # Use local fixed dataset utilities
 # from loreal_dataset_fixed import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
@@ -37,35 +37,6 @@ CKPT_DIR.mkdir(parents=True, exist_ok=True) #parents=True crea los directorios "
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-
-def build_eval_cache(test_dataset, physics, n_eval, device, seed):
-    """
-    Pre-generate fixed (x_gt, y_noisy) pairs.
-
-    Without this, Poisson noise is resampled every epoch and PSNR/val_loss are not
-    comparable across epochs, which makes the model look like it improves every time.
-    """
-    cpu_state = torch.get_rng_state()
-    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    cache = []
-    with torch.no_grad():
-        for i in range(n_eval):
-            x_clean_stack, x_clean = test_dataset[i]
-            x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
-            x_gt = x_clean.unsqueeze(0).to(device)
-            x_clean_img = x_clean_stack[:, 0:1, :, :]
-            y_noisy = physics(x_clean_img) #Acá es donde agrego ruido sintético
-            cache.append((x_gt.detach().cpu(), y_noisy.detach().cpu()))
-
-    torch.set_rng_state(cpu_state)
-    if cuda_states is not None:
-        torch.cuda.set_rng_state_all(cuda_states)
-    print(f"Built eval cache with {len(cache)} fixed noisy samples (seed={seed}).")
-    return cache
 
 
 def evaluate_epoch(model, criterion, physics, eval_cache, device, eval_seed):

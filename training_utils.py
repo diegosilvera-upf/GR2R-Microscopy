@@ -8,6 +8,7 @@ and each script imports what it needs.
 from datetime import datetime
 from pathlib import Path
 
+import torch
 import torch.nn as nn
 
 
@@ -147,3 +148,41 @@ def load_loreal_split(valid_sequences, split_file, val_prefixes=None, test_prefi
             print("Fallback had no val matches — using deterministic 90/10 train/val split.")
 
     return train_seq, val_seq, test_seq, visualize_names
+
+
+def build_eval_cache(test_dataset, physics, n_eval, device, seed, num_frames=1):
+    """Pre-generate fixed (x_gt, y_noisy) pairs for reproducible evaluation.
+
+    Without a fixed cache, Poisson noise is resampled every epoch so metrics
+    are not comparable across epochs.
+
+    Args:
+        num_frames: 1 for DRUNet (noise on one frame), >1 for FastDVDNet
+                    (noise applied independently to each of the num_frames frames).
+    """
+    cpu_state = torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    cache = []
+    with torch.no_grad():
+        for i in range(n_eval):
+            x_clean_stack, x_clean = test_dataset[i]
+            x_clean_stack = x_clean_stack.unsqueeze(0).to(device)
+            x_gt = x_clean.unsqueeze(0).to(device)
+
+            if num_frames == 1:
+                noisy = physics(x_clean_stack[:, 0:1, :, :])
+            else:
+                frames = [physics(x_clean_stack[:, j:j+1]) for j in range(num_frames)]
+                noisy = torch.cat(frames, dim=1)
+
+            cache.append((x_gt.detach().cpu(), noisy.detach().cpu()))
+
+    torch.set_rng_state(cpu_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
+    print(f"Built eval cache with {len(cache)} fixed noisy samples (seed={seed}).")
+    return cache
