@@ -23,37 +23,16 @@ import torch
 from deepinv.loss import PSNR, R2RLoss, SSIM
 from tqdm import tqdm
 
-from loreal_dataset import LorealSequenceDataset
-from loreal_dataset_fixed import get_fmdd_sequences
+# from loreal_dataset import LorealSequenceDataset
+# from loreal_dataset_fixed import get_fmdd_sequences
+from dataset import LorealSequenceDataset, get_fmdd_sequences
 from models_FastDVDnet_sans_noise_map import FastDVDnet
+from training_utils import FastDVDNetContextWrapper
 
 BASE_DIR = Path(".")
 DEFAULT_RESULTS_DIR = BASE_DIR / "results" / "inference_fastdvdnet"
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-
-
-# ---------------------------------------------------------------------------
-# Model wrapper (same as training scripts)
-# ---------------------------------------------------------------------------
-
-
-class FastDVDNetContextWrapper(torch.nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self._context = None
-
-    def set_context(self, stack):
-        self._context = stack.detach()
-
-    def forward(self, y_central, physics=None, **kwargs):
-        if self._context is None:
-            raise RuntimeError("Call set_context(stack) before forward pass.")
-        stack = self._context.clone()
-        stack[:, 2:3, :, :] = y_central
-        return self.model(stack)
-
 
 # ---------------------------------------------------------------------------
 # Geometric TTA helpers (ported from deprecated test4.py — math verified)
@@ -210,6 +189,16 @@ def _build_fmdd_dict(root: Path, modality: str, seq_id: str) -> dict:
     }
 
 
+def resolve_tif_sequence(line: str) -> list[Path]:
+    p = Path(line)
+    if not p.is_dir():
+        raise FileNotFoundError(f"tif-seq directory not found: {line!r}")
+    tifs = sorted(p.glob("*.tif")) + sorted(p.glob("*.tiff"))
+    if len(tifs) < 5:
+        raise ValueError(f"{p}: need at least 5 TIF frames, found {len(tifs)}")
+    return tifs
+
+
 def resolve_fmdd_sequence(line: str, fmdd_root: Path) -> dict:
     p = Path(line)
     if p.is_dir():
@@ -297,6 +286,16 @@ def read_png_tensor(path: Path) -> torch.Tensor:
     return img
 
 
+def read_tif_tensor(path: Path, data_scale: float) -> torch.Tensor:
+    img = tifffile.imread(str(path)).astype(np.float32) / data_scale
+    t = torch.from_numpy(img)
+    if t.ndim == 2:
+        t = t.unsqueeze(0)
+    elif t.ndim == 3:
+        t = t[0:1]
+    return t
+
+
 def save_run_config(output_dir: Path, args: argparse.Namespace, sequences: list) -> None:
     with open(output_dir / "inference_config.txt", "w") as f:
         f.write(f"timestamp={datetime.now().isoformat()}\n")
@@ -312,6 +311,49 @@ def save_run_config(output_dir: Path, args: argparse.Namespace, sequences: list)
 # ---------------------------------------------------------------------------
 # Inference per dataset
 # ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def run_tif_sequence(
+    model,
+    physics,
+    tif_files: list[Path],
+    output_dir: Path,
+    data_scale: float,
+    max_frames: int | None,
+    frame_stride: int,
+    save_noisy: bool,
+    n_samples: int,
+    geometric: bool,
+) -> None:
+    mid = 2
+    center_indices = list(range(mid, len(tif_files) - mid, frame_stride))
+    if max_frames is not None:
+        center_indices = center_indices[:max_frames]
+
+    denoised_list: list[np.ndarray] = []
+    noisy_list: list[np.ndarray] = []
+    seq_name = tif_files[0].parent.name
+
+    for i in tqdm(center_indices, desc=seq_name, leave=False):
+        window = [
+            read_tif_tensor(tif_files[j], data_scale).unsqueeze(0).to(device)
+            for j in range(i - mid, i + mid + 1)
+        ]
+        stack = torch.cat(window, dim=1)
+        stack = crop_div4(stack)
+        y_central = stack[:, 2:3, :, :]
+
+        x_est = ensemble_forward(model, stack, physics, n_samples, geometric)
+        denoised_list.append((x_est * data_scale).squeeze().cpu().numpy().astype(np.float32))
+        if save_noisy:
+            noisy_list.append((y_central * data_scale).squeeze().cpu().numpy().astype(np.float32))
+
+    stack_out = np.stack(denoised_list, axis=0)
+    tifffile.imwrite(str(output_dir / f"{seq_name}_denoised.tif"), stack_out)
+    if save_noisy and noisy_list:
+        tifffile.imwrite(str(output_dir / f"{seq_name}_noisy.tif"), np.stack(noisy_list, axis=0))
+    print(f"  Saved {seq_name}_denoised.tif shape={stack_out.shape}")
 
 
 @torch.no_grad()
@@ -453,9 +495,11 @@ def run_loreal_sequence(
 # ---------------------------------------------------------------------------
 
 
-def default_noise_and_scale(dataset: str) -> tuple[float, float]:
+def default_noise_and_scale(dataset: str) -> tuple[float, float | None]:
     if dataset == "fmdd":
         return 1 / 255.0, 1.0
+    if dataset == "tif-seq":
+        return 1 / 255.0, None  # data_scale must be set explicitly by the user
     return 1 / 255.0, 255.0
 
 
@@ -480,7 +524,7 @@ def main() -> None:
         description="FastDVDNet inference with geometric TTA and/or stochastic R2R ensemble."
     )
     parser.add_argument("--weights", type=Path, required=True)
-    parser.add_argument("--dataset", choices=["fmdd", "loreal"], required=True)
+    parser.add_argument("--dataset", choices=["fmdd", "loreal", "tif-seq"], required=True)
     parser.add_argument("--sequences", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--fmdd-root", type=Path, default=Path("../data/FMDD"))
@@ -519,6 +563,8 @@ def main() -> None:
     default_noise, default_scale = default_noise_and_scale(args.dataset)
     noise = args.noise if args.noise is not None else default_noise
     data_scale = args.data_scale if args.data_scale is not None else default_scale
+    if args.dataset == "tif-seq" and data_scale is None:
+        raise ValueError("--data-scale is required for --dataset tif-seq (e.g. 255.0 or 65535.0)")
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     output_dir = args.output_dir or (DEFAULT_RESULTS_DIR / f"{args.dataset}_{timestamp}")
@@ -545,7 +591,17 @@ def main() -> None:
     save_clean = not args.no_save_clean
     metrics_rows: list[dict] = []
 
-    if args.dataset == "fmdd":
+    if args.dataset == "tif-seq":
+        tif_seqs = [resolve_tif_sequence(line) for line in lines]
+        save_run_config(output_dir, args, [str(s[0].parent) for s in tif_seqs])
+        for tif_files in tif_seqs:
+            print(f"Processing tif-seq {tif_files[0].parent.name} ({len(tif_files)} frames)...")
+            run_tif_sequence(
+                model, physics, tif_files, output_dir,
+                data_scale, args.max_frames, args.frame_stride, save_noisy,
+                args.n_samples, args.geometric_ensemble,
+            )
+    elif args.dataset == "fmdd":
         fmdd_seqs = [resolve_fmdd_sequence(line, args.fmdd_root) for line in lines]
         save_run_config(output_dir, args, [f"{s['modality']}/{s['seq_id']}" for s in fmdd_seqs])
 

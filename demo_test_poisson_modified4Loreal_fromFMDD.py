@@ -14,12 +14,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
+from training_utils import save_parameters, load_loreal_split
 
 import deepinv as dinv
 from deepinv.loss import R2RLoss
 
-from loreal_dataset import get_valid_sequences, LorealSequenceDataset
-
+# from loreal_dataset import get_valid_sequences, LorealSequenceDataset
+from dataset import get_valid_sequences, LorealSequenceDataset
 
 # ---------------------------------------------------------------
 # Setup paths
@@ -35,97 +36,6 @@ CKPT_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-
-
-def save_parameters(args, output_dir):
-    """Save experiment parameters to a text file in the output directory."""
-    with open(output_dir / "parameters.txt", "w") as f:
-        f.write("Experiment: demo_test_poisson_modified4Loreal_fromFMDD.py\n")
-        f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Device: {device}\n")
-        f.write("-" * 50 + "\n")
-        for key in dir(args):
-            if key.startswith("_"):
-                continue
-            value = getattr(args, key)
-            if not callable(value):
-                f.write(f"{key} = {value}\n")
-    print(f"Parameters saved to {output_dir / 'parameters.txt'}")
-
-
-def load_loreal_split(valid_sequences, split_file, val_prefixes=None, test_prefixes=None):
-    """
-    Returns train/val/test split using:
-      1) explicit split file when available
-      2) otherwise, prefix-based fallback for val/test
-    """
-    seq_by_name = {Path(seq_path).name: (seq_path, a, b) for seq_path, a, b in valid_sequences}
-
-    train_seq = []
-    val_seq = []
-    test_seq = []
-    visualize_names = []
-
-    if split_file.exists():
-        print(f"Loading split from {split_file}")
-        with open(split_file, "r") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if (not line) or line.startswith("#"):
-                    continue
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) < 2:
-                    continue
-                seq_name = parts[0]
-                role = parts[1].lower()
-                visualize = len(parts) >= 3 and parts[2].lower() == "true"
-
-                if seq_name not in seq_by_name:
-                    print(f"  WARNING: {seq_name} in split file was not found in valid Loreal sequences.")
-                    continue
-
-                item = seq_by_name[seq_name]
-                if role == "val":
-                    val_seq.append(item)
-                elif role == "test":
-                    test_seq.append(item)
-                else:
-                    train_seq.append(item)
-
-                if visualize:
-                    visualize_names.append(seq_name)
-
-        assigned = {Path(s[0]).name for s in train_seq + val_seq + test_seq}
-        leftovers = [item for item in valid_sequences if Path(item[0]).name not in assigned]
-        train_seq.extend(leftovers)
-        if leftovers:
-            print(f"Added {len(leftovers)} unassigned sequences to train.")
-    else:
-        print("No split file found. Using prefix fallback split.")
-        val_prefixes = val_prefixes or []
-        test_prefixes = test_prefixes or []
-
-        def starts_with_any(name, prefixes):
-            return any(name.startswith(prefix) for prefix in prefixes)
-
-        for item in valid_sequences:
-            name = Path(item[0]).name
-            if starts_with_any(name, test_prefixes):
-                test_seq.append(item)
-            elif starts_with_any(name, val_prefixes):
-                val_seq.append(item)
-            else:
-                train_seq.append(item)
-
-        if len(val_seq) == 0:
-            n_train = int(0.9 * len(valid_sequences))
-            train_seq = valid_sequences[:n_train]
-            val_seq = valid_sequences[n_train:]
-            test_seq = []
-            print("Fallback had no val matches, using deterministic 90/10 train/val split.")
-
-    return train_seq, val_seq, test_seq, visualize_names
-
 
 def _to_model_input(y_stack):
     """Map Loreal dataset output [B, num_frames, H, W] to DRUNet input [B, 1, H, W]."""
@@ -206,7 +116,7 @@ def train_model(args):
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     output_dir = RESULTS_DIR / f"tif_output_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_parameters(args, output_dir)
+    save_parameters(args, output_dir, script_name=Path(__file__).name, device=device)
 
     print(f"Starting training on {device} with {args.loss} loss...")
 
@@ -392,7 +302,7 @@ class Args:
     noise = 1 / 255.0
     alpha = 0.15
 
-    epochs = 40
+    epochs = 2
     batch_size = 16
     val_batch_size = 16
     lr = 1e-4

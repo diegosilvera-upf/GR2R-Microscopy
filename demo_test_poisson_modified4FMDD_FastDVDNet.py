@@ -21,67 +21,10 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 
 # Use local fixed dataset utilities
-from loreal_dataset_fixed import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
+# from loreal_dataset_fixed import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
+from dataset import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
+from training_utils import FastDVDNetContextWrapper, save_parameters
 from models_FastDVDnet_sans_noise_map import FastDVDnet
-
-# class FastDVDnetR2RWrapper(torch.nn.Module):
-#     """
-#     Wrapper to make FastDVDnet compatible with deepinv's R2RLoss.
-#     It takes a 5-frame stack as context and allows R2RLoss to perturb the central frame.
-#     """
-#     def __init__(self, model, alpha=0.15):
-#         super().__init__()
-#         self.model = model
-#         self.alpha = alpha
-#         self._context = None
-
-#     def set_context(self, stack):
-#         """Stores the 5-frame stack before the forward pass."""
-#         self._context = stack.detach()
-
-#     def forward(self, y_central, physics=None, update_parameters=False, **kwargs):
-#         if self._context is None:
-#             raise RuntimeError("Call set_context(stack) before forward pass.")
-        
-#         # Clone to avoid modifying the original stack
-#         stack = self._context.clone()
-        
-#         # SNR Consistency: Recorrupt the rest of the stack to match y_central's noise level
-#         if self.training:
-#             with torch.no_grad():
-#                 gain = physics.noise_model.gain if (physics is not None and hasattr(physics.noise_model, 'gain')) else args.noise
-#                 for i in [0, 1, 3, 4]:
-#                     y_neighbor = stack[:, i:i+1, :, :]
-#                     z = y_neighbor / gain
-#                     # alpha is the probability of removal in deepinv's set_binomial_corruptor
-#                     sampler = torch.distributions.Binomial(torch.clamp(torch.round(z), min=0), self.alpha)
-#                     stack[:, i:i+1, :, :] = gain * (z - sampler.sample()) / (1.0 - self.alpha)
-        
-#         # Replace central frame with the (already recorrupted) y_central
-#         stack[:, 2:3, :, :] = y_central
-        
-#         # FastDVDnet handles the forward pass
-#         return self.model(stack)
-
-#I'll try the easiest context wrapper, the other one seems overcomplicated
-class FastDVDNetContextWrapper(torch.nn.Module):
-    """Wraps FastDVDnet to manage the 5-frame context for R2RLoss.
-    Only the central frame (position 2) is replaced by R2R's recorrupted input.
-    Context frames stay at their original noise level — intentional: better temporal context."""
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self._context = None
-
-    def set_context(self, stack):
-        self._context = stack.detach()
-
-    def forward(self, y_central, physics=None, **kwargs):
-        if self._context is None:
-            raise RuntimeError("Call set_context(stack) before forward pass.")
-        stack = self._context.clone()
-        stack[:, 2:3, :, :] = y_central
-        return self.model(stack)
 
 # ---------------------------------------------------------------
 # Setup paths
@@ -96,21 +39,6 @@ CKPT_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-
-def save_parameters(args, output_dir):
-    """Save experiment parameters to a text file in the output directory."""
-    with open(output_dir / "parameters.txt", "w") as f:
-        f.write(f"Experiment: demo_test_poisson_modified4FMDD_FastDVDNet.py\n")
-        f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Device: {device}\n")
-        f.write("-" * 50 + "\n")
-        # Capture all non-private, non-callable attributes (class and instance)
-        for key in dir(args):
-            if not key.startswith("_"):
-                value = getattr(args, key)
-                if not callable(value):
-                    f.write(f"{key} = {value}\n")
-    print(f"Parameters saved to {output_dir / 'parameters.txt'}")
 
 #This function is to eval as in demo_test_poisson_modified4FMDD.py
 def build_eval_cache(test_dataset, physics, n_eval, device, seed):
@@ -177,7 +105,7 @@ def train_model(args):
         timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
         output_dir = RESULTS_DIR / f"tif_output_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_parameters(args, output_dir)
+    save_parameters(args, output_dir, script_name=Path(__file__).name, device=device)
     print(f"Starting training on {device} with {args.loss} loss...")
     
     # 1. Setup Noise and Physics
@@ -407,14 +335,14 @@ class Args:
     loss = "gr2r_mse"
     gamma = 1/255.0       # era: noise = 1/255.0
     alpha = 0.15
-    epochs = 0          # era: 200
+    epochs = 2          # era: 200
     batch_size = 16
     lr = 1e-4
     patch_size = 256      # nuevo (era variable local en train_model)
     data_scale = 1.0      # nuevo
     n_eval_sequences = None  # nuevo
     eval_seed = 42        # nuevo
-    inference_dir = "results/denoising-poisson-fmdd-fastdvdnet-retry/tif_output_2026_06_09-16_44_13"# None  # setear al directorio del run anterior para saltear entrenamiento
+    inference_dir = None #"results/denoising-poisson-fmdd-fastdvdnet-retry/tif_output_2026_06_09-16_44_13"# None  # setear al directorio del run anterior para saltear entrenamiento
 
 
 

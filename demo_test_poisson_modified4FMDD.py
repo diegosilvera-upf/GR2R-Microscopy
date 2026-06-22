@@ -19,9 +19,11 @@ from deepinv.loss import PSNR, SSIM, R2RLoss
 import tifffile
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from training_utils import save_parameters
 
 # Use local fixed dataset utilities
-from loreal_dataset_fixed import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
+# from loreal_dataset_fixed import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
+from dataset import FMDDataset, get_fmdd_sequences, get_fmdd_split_from_file
 
 # ---------------------------------------------------------------
 # Setup paths
@@ -35,22 +37,6 @@ CKPT_DIR.mkdir(parents=True, exist_ok=True) #parents=True crea los directorios "
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-
-def save_parameters(args, output_dir):
-    """Save experiment parameters to a text file in the output directory."""
-    with open(output_dir / "parameters.txt", "w") as f:
-        f.write(f"Experiment: demo_test_poisson_modified4FMDD.py\n")
-        f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Device: {device}\n")
-        f.write("-" * 50 + "\n")
-        # Capture all non-private, non-callable attributes (class and instance)
-        for key in dir(args):
-            if not key.startswith("_"):
-                value = getattr(args, key)
-                if not callable(value):
-                    f.write(f"{key} = {value}\n")
-    print(f"Parameters saved to {output_dir / 'parameters.txt'}")
-
 
 def build_eval_cache(test_dataset, physics, n_eval, device, seed):
     """
@@ -112,7 +98,7 @@ def train_model(args):
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     output_dir = RESULTS_DIR / f"tif_output_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_parameters(args, output_dir)
+    save_parameters(args, output_dir, script_name=Path(__file__).name, device=device)
 
     print(f"Starting training on {device} with {args.loss} loss...")
     
@@ -245,7 +231,7 @@ def train_model(args):
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Loss")
     if len(val_psnrs) == args.epochs:
-        ax2 = ax1.gca().twinx()
+        ax2 = ax1.twinx()
         ax2.plot(range(1, args.epochs + 1), val_psnrs, "g--", label="Val PSNR (dB)")
         ax2.set_ylabel("Val PSNR (dB)")
         ax1.legend(loc="upper left")
@@ -291,7 +277,7 @@ class Args:
     loss = "gr2r_mse"
     gamma = 1/255.0
     alpha = 0.15
-    epochs = 100
+    epochs = 3
     batch_size = 16 # Normalized batch size
     lr = 1e-4
     patch_size = 256

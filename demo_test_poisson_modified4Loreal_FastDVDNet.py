@@ -16,79 +16,13 @@ from torchvision import transforms
 from deepinv.loss import R2RLoss
 import tifffile
 from tqdm import tqdm
+from training_utils import FastDVDNetContextWrapper, save_parameters, load_loreal_split
 
-from loreal_dataset import get_valid_sequences, LorealSequenceDataset
+# from loreal_dataset import get_valid_sequences, LorealSequenceDataset
+from dataset import get_valid_sequences, LorealSequenceDataset
 import matplotlib.pyplot as plt
 
-
-# # Add Loreal directory to sys.path to import dataset utilities
-# sys.path.append(str(Path("../Loreal").absolute()))
-# sys.path.append(str(Path("/home/diegosilvera/Escritorio/2026").resolve()))
-
-# from dataset import LorealDataset, get_valid_sequences, FastDVDnetDataset
-# # Import linear_transform but we'll use it carefully or skip if it causes bias
-# from utils import linear_transform
 from models_FastDVDnet_sans_noise_map import FastDVDnet
-
-##### Esta clase la comento, quedo complicada de más y capaz rompe cosas
-# class FastDVDnetR2RWrapper(torch.nn.Module):
-#     """
-#     Wrapper to make FastDVDnet compatible with deepinv's R2RLoss.
-#     It takes a 5-frame stack as context and allows R2RLoss to perturb the central frame.
-#     """
-#     def __init__(self, model, alpha=0.15):
-#         super().__init__()
-#         self.model = model
-#         self.alpha = alpha
-#         self._context = None
-
-#     def set_context(self, stack):
-#         """Stores the 5-frame stack before the forward pass."""
-#         self._context = stack.detach()
-
-#     def forward(self, y_central, physics=None, update_parameters=False, **kwargs):
-#         if self._context is None:
-#             raise RuntimeError("Call set_context(stack) before forward pass.")
-        
-#         # Clone to avoid modifying the original stack
-#         stack = self._context.clone()
-        
-#         # SNR Consistency: Recorrupt the rest of the stack to match y_central's noise level
-#         # Following exactly the logic in deepinv.loss.r2r.py:
-#         # y1 = gamma * (z - Binomial(z, alpha)) / (1 - alpha)
-#         if self.training:
-#             with torch.no_grad():
-#                 gain = physics.noise_model.gain if (physics is not None and hasattr(physics.noise_model, 'gain')) else args.noise
-#                 for i in [0, 1, 3, 4]:
-#                     y_neighbor = stack[:, i:i+1, :, :]
-#                     z = y_neighbor / gain
-#                     # Note: alpha is the probability of removal in deepinv's set_binomial_corruptor
-#                     sampler = torch.distributions.Binomial(torch.clamp(torch.round(z), min=0), self.alpha)
-#                     stack[:, i:i+1, :, :] = gain * (z - sampler.sample()) / (1.0 - self.alpha)
-        
-#         # Replace central frame with the (already recorrupted) y_central
-#         stack[:, 2:3, :, :] = y_central
-        
-#         # FastDVDnet handles the forward pass
-#         return self.model(stack)
-
-# Me la hizo Claude, es mucho más directa.
-# Deepinv se encarga de agregar ruido, acá solo aislo el frame central
-class FastDVDNetContextWrapper(torch.nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self._context = None
-
-    def set_context(self, stack):
-        self._context = stack.detach()
-
-    def forward(self, y_central, physics=None, **kwargs):
-        if self._context is None:
-            raise RuntimeError("Call set_context(stack) before forward pass.")
-        stack = self._context.clone()
-        stack[:, 2:3, :, :] = y_central
-        return self.model(stack)
 
 # ---------------------------------------------------------------
 # Setup paths
@@ -104,95 +38,6 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SPLIT_FILE = BASE_DIR / "txts/loreal_split.txt"
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-
-def save_parameters(args, output_dir):
-    """Save experiment parameters to a text file in the output directory."""
-    with open(output_dir / "parameters.txt", "w") as f:
-        f.write(f"Experiment: demo_test_poisson_modified4Loreal_FastDVDNet.py\n")
-        f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Device: {device}\n")
-        f.write("-" * 50 + "\n")
-        # Capture all non-private, non-callable attributes (class and instance)
-        for key in dir(args):
-            if not key.startswith("_"):
-                value = getattr(args, key)
-                if not callable(value):
-                    f.write(f"{key} = {value}\n")
-    print(f"Parameters saved to {output_dir / 'parameters.txt'}")
-
-# Idem que en DRUnet + Loreal
-def load_loreal_split(valid_sequences, split_file, val_prefixes=None, test_prefixes=None):
-    """
-    Returns train/val/test split using:
-      1) explicit split file when available
-      2) otherwise, prefix-based fallback for val/test
-    """
-    seq_by_name = {Path(seq_path).name: (seq_path, a, b) for seq_path, a, b in valid_sequences}
-
-    train_seq = []
-    val_seq = []
-    test_seq = []
-    visualize_names = []
-
-    if split_file.exists():
-        print(f"Loading split from {split_file}")
-        with open(split_file, "r") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if (not line) or line.startswith("#"):
-                    continue
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) < 2:
-                    continue
-                seq_name = parts[0]
-                role = parts[1].lower()
-                visualize = len(parts) >= 3 and parts[2].lower() == "true"
-
-                if seq_name not in seq_by_name:
-                    print(f"  WARNING: {seq_name} in split file was not found in valid Loreal sequences.")
-                    continue
-
-                item = seq_by_name[seq_name]
-                if role == "val":
-                    val_seq.append(item)
-                elif role == "test":
-                    test_seq.append(item)
-                else:
-                    train_seq.append(item)
-
-                if visualize:
-                    visualize_names.append(seq_name)
-
-        assigned = {Path(s[0]).name for s in train_seq + val_seq + test_seq}
-        leftovers = [item for item in valid_sequences if Path(item[0]).name not in assigned]
-        train_seq.extend(leftovers)
-        if leftovers:
-            print(f"Added {len(leftovers)} unassigned sequences to train.")
-    else:
-        print("No split file found. Using prefix fallback split.")
-        val_prefixes = val_prefixes or []
-        test_prefixes = test_prefixes or []
-
-        def starts_with_any(name, prefixes):
-            return any(name.startswith(prefix) for prefix in prefixes)
-
-        for item in valid_sequences:
-            name = Path(item[0]).name
-            if starts_with_any(name, test_prefixes):
-                test_seq.append(item)
-            elif starts_with_any(name, val_prefixes):
-                val_seq.append(item)
-            else:
-                train_seq.append(item)
-
-        if len(val_seq) == 0:
-            n_train = int(0.9 * len(valid_sequences))
-            train_seq = valid_sequences[:n_train]
-            val_seq = valid_sequences[n_train:]
-            test_seq = []
-            print("Fallback had no val matches, using deterministic 90/10 train/val split.")
-
-    return train_seq, val_seq, test_seq, visualize_names
 
 #Idem que DRUnet + Loreal, pero agarrando el frame central
 def evaluate_val_loss(model, val_loader, criterion, physics, eval_seed):
@@ -262,7 +107,7 @@ def train_model(args):
         timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
         output_dir = RESULTS_DIR / f"tif_output_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_parameters(args, output_dir)
+    save_parameters(args, output_dir, script_name=Path(__file__).name, device=device)
 
     print(f"Starting training on {device} with {args.loss} loss...")
 
@@ -429,10 +274,10 @@ def train_model(args):
 class Args:
     loss = "gr2r_mse"
     gamma = 1/255.0
-    alpha = 0.15
-    epochs = 100
-    batch_size = 16
-    val_batch_size = 16
+    alpha = 0.85
+    epochs = 3
+    batch_size = 32
+    val_batch_size = 32
     lr = 1e-4
     patch_size = 256
     data_scale = 255.0
@@ -450,23 +295,3 @@ class Args:
 if __name__ == "__main__":
     args = Args()
     train_model(args)
-
-##################################################################################
-        # 6. Evaluation (Visual check) — DEPRECATED
-        # model.eval()
-        # print(f"Epoch {epoch+1} Evaluation...")
-        # with torch.no_grad():
-        #     # Process one test stack
-        #     stack_test, y_test = test_dataset[3] # Evaluation on a fixed sequence
-        #     stack_test = stack_test.unsqueeze(0).to(device)
-        #     y_test = y_test.unsqueeze(0).to(device)
-
-        #     # Use inner model if adapted
-        #     inner_model = model.model if hasattr(model, "model") else model
-        #     inner_model.set_context(stack_test)
-        #     x_est = inner_model(y_test, physics)
-
-        #     # Save output
-        #     tifffile.imwrite(str(output_dir / f"epoch_{epoch}_denoised.tif"), (x_est * 255).squeeze().cpu().numpy().astype(np.float32))
-        #     if epoch < 10:
-        #         tifffile.imwrite(str(output_dir / f"input_noisy_{epoch}.tif"), (y_test * 255).squeeze().cpu().numpy().astype(np.float32))
