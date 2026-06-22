@@ -2,6 +2,10 @@
 data/
 ckpts/
 results/
+deprecated/
+original_notebooks/
+claude_things/
+white_patches_code/
 
 __pycache__/loreal_utils.cpython-310.pyc
 __pycache__/loreal_dataset.cpython-310.pyc
@@ -24,3 +28,4 @@ demo_test_poisson.ipynb
 demo_test_gaussian.ipynb
 demo_test_gamma.ipynb
 FastDVDnet-pure_poisson-a=1-normalization_by_255.pth
+__pycache__/training_utils.cpython-310.pyc
