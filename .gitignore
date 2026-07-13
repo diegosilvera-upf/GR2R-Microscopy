@@ -2,10 +2,13 @@
 data/
 ckpts/
 results/
+old_results/
 deprecated/
 original_notebooks/
 claude_things/
 white_patches_code/
+__pycache__/
+*.ipynb
 
 __pycache__/loreal_utils.cpython-310.pyc
 __pycache__/loreal_dataset.cpython-310.pyc

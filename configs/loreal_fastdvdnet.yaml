@@ -1,0 +1,28 @@
+model: fastdvdnet
+dataset: loreal
+loss: r2r
+
+project_name: denoising-poisson-loreal-fastdvdnet
+loreal_data_dir: /home/diegosilvera/Escritorio/2026/sequences_almost_Poisson
+loreal_split_file: txts/loreal_split.txt
+
+gamma: 0.00392156862745098   # 1/255
+alpha: 0.15
+epochs: 80
+batch_size: 32
+val_batch_size: 32
+lr: 0.0001
+patch_size: 256
+data_scale: 255.0
+num_workers: 4
+repeats_per_frame: 10
+eval_seed: 43
+checkpoint_every: 10
+max_export_sequences: 2
+
+val_prefixes: [HF1_, Mela1_]
+test_prefixes: [HF2_, Mela2_]
+
+# Transfer learning from FMDD FastDVDNet — set pretrained_ckpt: null to train from scratch
+pretrained_ckpt: FastDVDnet-pure_poisson-a=1-normalization_by_255.pth
+inference_dir: null

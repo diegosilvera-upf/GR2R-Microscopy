@@ -1,0 +1,24 @@
+model: fastdvdnet
+dataset: fmdd
+loss: r2r
+
+project_name: denoising-poisson-fmdd-fastdvdnet
+fmdd_data_dir: ../data/FMDD
+fmdd_split_file: txts/fmdd_split.txt
+
+gamma: 0.00392156862745098   # 1/255
+alpha: 0.15
+epochs: 100
+batch_size: 16
+lr: 0.0001
+patch_size: 256
+data_scale: 1.0
+num_workers: 4
+repeats_per_sequence: 55
+eval_seed: 42
+n_eval_sequences: null
+checkpoint_every: 10
+max_export_sequences: 3
+
+pretrained_ckpt: null
+inference_dir: null

@@ -37,7 +37,7 @@ def split_tiff_sequences(input_dir, output_dir):
 
         for frame_idx, frame in enumerate(sequence):
 
-            frame_path = sequence_out_dir / f"frame_{frame_idx:04d}.tif"
+            frame_path = sequence_out_dir / f"frame_{frame_idx + 2:04d}.tif"
 
             tifffile.imwrite(
                 frame_path,
@@ -51,7 +51,7 @@ def split_tiff_sequences(input_dir, output_dir):
 
 if __name__ == "__main__":
 
-    input_dir = "results/inference_fastdvdnet/loreal_2026_06_14-12_33_12"
-    output_dir = "results/inference_fastdvdnet/loreal_2026_06_14-12_33_12_splitted"
+    input_dir = "results/denoising-poisson-loreal-fastdvdnet-l2r/tif_output_2026_06_25-19_39_41"
+    output_dir = "results/denoising-poisson-loreal-fastdvdnet-l2r/tif_output_2026_06_30-testing_indexes"
 
     split_tiff_sequences(input_dir, output_dir)

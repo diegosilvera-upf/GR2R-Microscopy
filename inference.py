@@ -161,9 +161,16 @@ def build_model(model_type: str, noise: float, alpha: float) -> torch.nn.Module:
 
 
 def load_weights(model: torch.nn.Module, weights_path: Path) -> None:
-    checkpoint = torch.load(weights_path, map_location=device)
-    state_dict = checkpoint.get("state_dict", checkpoint)
+    checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint.get("model_state_dict", checkpoint))
     cleaned = {k: v for k, v in state_dict.items() if not k.startswith("noise_model.")}
+    # If checkpoint keys don't overlap with model keys, try adding "model." prefix.
+    # This handles plain FastDVDNet checkpoints loaded into FastDVDNetContextWrapper.
+    model_keys = set(model.state_dict().keys())
+    if not (model_keys & set(cleaned.keys())):
+        prefixed = {f"model.{k}": v for k, v in cleaned.items()}
+        if model_keys & set(prefixed.keys()):
+            cleaned = prefixed
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
     if missing:
         print(f"WARNING: {len(missing)} missing keys when loading weights")
@@ -353,6 +360,64 @@ def default_noise_and_scale(dataset: str) -> tuple[float, float | None]:
     if dataset == "tif-seq":
         return 1 / 255.0, None  # user must provide --data-scale
     return 1 / 255.0, 255.0  # loreal
+
+
+# ---------------------------------------------------------------------------
+# Blind quality metric: PURE (Poisson Unbiased Risk Estimator)
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def compute_pure_mc(
+    model: torch.nn.Module,
+    y_central: torch.Tensor,
+    physics,
+    noise_level: float,
+    y_stack: torch.Tensor | None = None,
+    eps: float | None = None,
+) -> float:
+    """MC estimate of per-pixel MSE without a clean reference (PURE for Poisson noise).
+
+    Assumes y ~ Poisson(x / noise_level) * noise_level (deepinv PoissonNoise convention).
+    Costs 2 forward passes using a Rademacher perturbation b ∈ {-1, +1}^N:
+
+        PURE = (1/M)[‖f(y)-y‖² + 2·α·(y⊙b)ᵀ(f(y+εb)-f(y))/ε − α·∑ᵢyᵢ]
+
+    where α = noise_level, M = number of pixels, and ε defaults to noise_level
+    (= one photon count in the normalized domain).
+
+    The second term estimates the weighted divergence ∑ᵢ yᵢ ∂fᵢ/∂yᵢ — how much
+    the denoiser "shrinks" the observation, which corrects the positive bias from
+    the first term.
+
+    Args:
+        y_central: [1, 1, H, W] central (or only) frame, normalized to [0, 1].
+        y_stack:   [1, 5, H, W] full temporal stack for FastDVDNet; None for DRUNet.
+                   Only the central frame is perturbed; context frames are fixed.
+        eps:       finite-difference step; defaults to noise_level.
+    """
+    if eps is None:
+        eps = noise_level
+
+    b = 2 * torch.randint(0, 2, y_central.shape, device=y_central.device, dtype=y_central.dtype) - 1
+    y_pert = (y_central + eps * b).clamp(min=0.0)
+
+    if y_stack is not None:
+        # FastDVDNet: set context, perturb only central frame
+        model.model.set_context(y_stack)
+        f_y = model(y_central, physics)
+        model.model.set_context(y_stack)
+        f_yb = model(y_pert, physics)
+    else:
+        f_y = model(y_central, physics)
+        f_yb = model(y_pert, physics)
+
+    n_pixels = f_y.numel()
+    residual_sq = ((f_y - y_central) ** 2).sum()
+    weighted_div = ((y_central * b) * (f_yb - f_y) / eps).sum()
+    bias_corr = noise_level * y_central.sum()
+
+    return ((residual_sq + 2 * noise_level * weighted_div - bias_corr) / n_pixels).item()
 
 
 # ---------------------------------------------------------------------------

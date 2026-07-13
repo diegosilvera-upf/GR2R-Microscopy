@@ -1,0 +1,29 @@
+model: drunet
+dataset: loreal
+loss: l2r
+
+project_name: denoising-poisson-loreal-drunet-l2r
+loreal_data_dir: /home/diegosilvera/Escritorio/2026/sequences_almost_Poisson
+loreal_split_file: txts/loreal_split.txt
+
+gamma: 0.00392156862745098   # 1/255
+alpha: 0.15
+l2r_eval_n_samples: 5
+epochs: 80
+batch_size: 16
+val_batch_size: 16
+lr: 0.0001
+patch_size: 256
+data_scale: 255.0
+num_workers: 4
+repeats_per_frame: 10
+eval_seed: 43
+checkpoint_every: 10
+max_export_sequences: 2
+
+val_prefixes: [HF1_, Mela1_]
+test_prefixes: [HF2_, Mela2_]
+
+pretrained_ckpt: null
+inference_dir: null
+l2r_recorruptor_ckpt: /home/diegosilvera/Escritorio/learning2recorrupt/identity_recorruptor.pth

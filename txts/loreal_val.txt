@@ -1,0 +1,3 @@
+HF8_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir
+HF1_Bruite_1024pix_Ex780nm_10pc_LineAccu12.tif_dir
+057
