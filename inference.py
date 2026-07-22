@@ -104,21 +104,51 @@ def inv_tta(y: torch.Tensor, mode: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
+def plain_forward(
+    model: torch.nn.Module,
+    y: torch.Tensor,
+    physics,
+    y_stack: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Single deterministic pass through the trained backbone (model.model).
+
+    Bypasses R2RModel's test-time ensembling, which otherwise averages
+    `eval_n_samples` random recorruptions of the input on every call to
+    `model(...)` — even when denoising a single, already-real measurement.
+    """
+    backbone = model.model
+    if y_stack is not None:
+        backbone.set_context(y_stack)
+    return backbone(y, physics)
+
+
 def ensemble_forward(
     model: torch.nn.Module,
     y_stack: torch.Tensor,
     physics,
     n_samples: int,
     geometric: bool,
+    plain: bool = False,
 ) -> torch.Tensor:
     """Average predictions over geometric transforms and/or stochastic recorruptions.
 
     Setting model.training=True tells the R2RModel adapter to apply a fresh binomial
     recorruption on each call, which is needed for the stochastic ensemble. Only the
     top-level training flag is toggled — the inner FastDVDNet stays in eval mode.
+
+    plain=True bypasses R2RModel entirely (see `plain_forward`): predictions are
+    averaged only over geometric transforms (if any), with no stochastic recorruption.
     """
     n_geom = 8 if geometric else 1
     out_sum = torch.zeros(1, 1, y_stack.shape[-2], y_stack.shape[-1], device=device)
+
+    if plain:
+        for m in range(n_geom):
+            t_stack = apply_tta(y_stack, m)
+            t_central = t_stack[:, 2:3, :, :]
+            x_est = plain_forward(model, t_central, physics, t_stack)
+            out_sum += inv_tta(x_est, m)
+        return out_sum / n_geom
 
     for _ in range(n_samples):
         for m in range(n_geom):
@@ -375,6 +405,7 @@ def compute_pure_mc(
     noise_level: float,
     y_stack: torch.Tensor | None = None,
     eps: float | None = None,
+    plain: bool = False,
 ) -> float:
     """MC estimate of per-pixel MSE without a clean reference (PURE for Poisson noise).
 
@@ -395,6 +426,9 @@ def compute_pure_mc(
         y_stack:   [1, 5, H, W] full temporal stack for FastDVDNet; None for DRUNet.
                    Only the central frame is perturbed; context frames are fixed.
         eps:       finite-difference step; defaults to noise_level.
+        plain:     if True, bypass R2RModel's stochastic test-time ensembling and
+                   use a single deterministic pass through the trained backbone
+                   (see `plain_forward`) for both forward evaluations.
     """
     if eps is None:
         eps = noise_level
@@ -402,7 +436,10 @@ def compute_pure_mc(
     b = 2 * torch.randint(0, 2, y_central.shape, device=y_central.device, dtype=y_central.dtype) - 1
     y_pert = (y_central + eps * b).clamp(min=0.0)
 
-    if y_stack is not None:
+    if plain:
+        f_y = plain_forward(model, y_central, physics, y_stack)
+        f_yb = plain_forward(model, y_pert, physics, y_stack)
+    elif y_stack is not None:
         # FastDVDNet: set context, perturb only central frame
         model.model.set_context(y_stack)
         f_y = model(y_central, physics)
@@ -436,6 +473,7 @@ def run_fmdd_clean(
     save_clean: bool,
     n_samples: int = 1,
     geometric: bool = False,
+    plain: bool = False,
 ) -> dict | None:
     """GT frame + synthetic Poisson noise. Computes PSNR/SSIM against GT."""
     gt_path = seq.get("gt")
@@ -448,12 +486,12 @@ def run_fmdd_clean(
 
     if model_type == "drunet":
         y_noisy = physics(x_clean)
-        x_est = model(y_noisy, physics)
+        x_est = plain_forward(model, y_noisy, physics) if plain else model(y_noisy, physics)
         y_for_save = y_noisy
     else:
         noisy_frames = [physics(x_clean) for _ in range(5)]
         stack_noisy = torch.cat(noisy_frames, dim=1)
-        x_est = ensemble_forward(model, stack_noisy, physics, n_samples, geometric)
+        x_est = ensemble_forward(model, stack_noisy, physics, n_samples, geometric, plain=plain)
         y_for_save = stack_noisy[:, 2:3, :, :]
 
     tag = f"{seq['modality']}_{seq['seq_id']}".replace("/", "_")
@@ -491,6 +529,7 @@ def run_fmdd_raw(
     save_noisy: bool,
     n_samples: int = 1,
     geometric: bool = False,
+    plain: bool = False,
 ) -> None:
     """Real noisy PNGs from FMDD raw folder.
 
@@ -509,7 +548,7 @@ def run_fmdd_raw(
         for i in tqdm(indices, desc=f"raw {tag}", leave=False):
             y = read_png_tensor(Path(frames[i])).unsqueeze(0).to(device)
             y = crop_to_model(y, model_type)
-            x_est = model(y, physics)
+            x_est = plain_forward(model, y, physics) if plain else model(y, physics)
             denoised_list.append(x_est.squeeze().cpu().numpy().astype(np.float32))
             if save_noisy:
                 noisy_list.append(y.squeeze().cpu().numpy().astype(np.float32))
@@ -529,7 +568,7 @@ def run_fmdd_raw(
             ]
             stack = torch.cat(window, dim=1)
             stack = crop_to_model(stack, model_type)
-            x_est = ensemble_forward(model, stack, physics, n_samples, geometric)
+            x_est = ensemble_forward(model, stack, physics, n_samples, geometric, plain=plain)
             denoised_list.append(x_est.squeeze().cpu().numpy().astype(np.float32))
             if save_noisy:
                 noisy_list.append(stack[:, 2:3].squeeze().cpu().numpy().astype(np.float32))
@@ -556,6 +595,7 @@ def run_loreal_sequence(
     save_noisy: bool,
     n_samples: int = 1,
     geometric: bool = False,
+    plain: bool = False,
 ) -> None:
     """Real noisy Loreal TIF frames.
 
@@ -575,7 +615,7 @@ def run_loreal_sequence(
             y = read_tif_tensor(tif_files[i], data_scale).unsqueeze(0).to(device)
             y = torch.clamp(y, min=0.0)
             y = crop_to_model(y, model_type)
-            x_est = model(y, physics)
+            x_est = plain_forward(model, y, physics) if plain else model(y, physics)
             denoised_frames.append((x_est * data_scale).squeeze().cpu().numpy().astype(np.float32))
             if save_noisy:
                 noisy_frames.append((y * data_scale).squeeze().cpu().numpy().astype(np.float32))
@@ -596,7 +636,7 @@ def run_loreal_sequence(
             y_stack, y_central = seq_ds[i]
             y_stack = y_stack.unsqueeze(0).to(device)
             y_central = y_central.unsqueeze(0).to(device)
-            x_est = ensemble_forward(model, y_stack, physics, n_samples, geometric)
+            x_est = ensemble_forward(model, y_stack, physics, n_samples, geometric, plain=plain)
             denoised_frames.append((x_est * data_scale).squeeze().cpu().numpy().astype(np.float32))
             if save_noisy:
                 noisy_frames.append((y_central * data_scale).squeeze().cpu().numpy().astype(np.float32))
@@ -621,6 +661,7 @@ def run_tif_sequence(
     save_noisy: bool,
     n_samples: int = 1,
     geometric: bool = False,
+    plain: bool = False,
 ) -> None:
     """Generic TIF sequence (not FMDD or Loreal format).
 
@@ -639,7 +680,7 @@ def run_tif_sequence(
             y = read_tif_tensor(tif_files[i], data_scale).unsqueeze(0).to(device)
             y = torch.clamp(y, min=0.0)
             y = crop_to_model(y, model_type)
-            x_est = model(y, physics)
+            x_est = plain_forward(model, y, physics) if plain else model(y, physics)
             denoised_list.append((x_est * data_scale).squeeze().cpu().numpy().astype(np.float32))
             if save_noisy:
                 noisy_list.append((y * data_scale).squeeze().cpu().numpy().astype(np.float32))
@@ -659,7 +700,7 @@ def run_tif_sequence(
             ]
             stack = torch.cat(window, dim=1)
             stack = crop_to_model(stack, model_type)
-            x_est = ensemble_forward(model, stack, physics, n_samples, geometric)
+            x_est = ensemble_forward(model, stack, physics, n_samples, geometric, plain=plain)
             denoised_list.append((x_est * data_scale).squeeze().cpu().numpy().astype(np.float32))
             if save_noisy:
                 noisy_list.append((stack[:, 2:3] * data_scale).squeeze().cpu().numpy().astype(np.float32))
@@ -736,12 +777,22 @@ def main() -> None:
         action="store_true",
         help="FastDVDNet only: average over all 8 D4 geometric transforms",
     )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Bypass R2RModel's stochastic test-time ensembling (which otherwise averages "
+             "eval_n_samples random recorruptions on every forward call). Single deterministic "
+             "pass through the trained backbone. Ignores --n-samples.",
+    )
     args = parser.parse_args()
 
     if args.model == "drunet" and (args.n_samples > 1 or args.geometric_ensemble):
         print("WARNING: --n-samples and --geometric-ensemble are only supported with fastdvdnet. Ignoring.")
         args.n_samples = 1
         args.geometric_ensemble = False
+
+    if args.plain and args.n_samples > 1:
+        print("WARNING: --plain bypasses R2RModel's stochastic ensembling; --n-samples is ignored.")
 
     if not args.weights.exists():
         raise FileNotFoundError(f"Weights not found: {args.weights}")
@@ -766,7 +817,9 @@ def main() -> None:
         f"Loaded {len(lines)} sequence(s) | model={args.model} | device={device} | "
         f"noise={noise:.5f} | alpha={args.alpha} | data_scale={data_scale}"
     )
-    if args.model == "fastdvdnet":
+    if args.plain:
+        print("Mode: plain (R2RModel ensembling bypassed, deterministic backbone forward)")
+    elif args.model == "fastdvdnet":
         print(
             f"Ensemble: n_samples={args.n_samples} | "
             f"geometric={'yes' if args.geometric_ensemble else 'no'} | "
@@ -793,7 +846,7 @@ def main() -> None:
             run_tif_sequence(
                 model, args.model, physics, tif_files, output_dir,
                 data_scale, args.max_frames, args.frame_stride, save_noisy,
-                args.n_samples, args.geometric_ensemble,
+                args.n_samples, args.geometric_ensemble, args.plain,
             )
 
     elif args.dataset == "fmdd":
@@ -805,7 +858,7 @@ def main() -> None:
             if args.fmdd_mode == "clean":
                 row = run_fmdd_clean(
                     model, args.model, physics, seq, output_dir, save_noisy, save_clean,
-                    args.n_samples, args.geometric_ensemble,
+                    args.n_samples, args.geometric_ensemble, args.plain,
                 )
                 if row:
                     metrics_rows.append(row)
@@ -814,7 +867,7 @@ def main() -> None:
                 run_fmdd_raw(
                     model, args.model, physics, seq, output_dir,
                     args.max_frames, args.frame_stride, save_noisy,
-                    args.n_samples, args.geometric_ensemble,
+                    args.n_samples, args.geometric_ensemble, args.plain,
                 )
 
     else:  # loreal
@@ -825,7 +878,7 @@ def main() -> None:
             run_loreal_sequence(
                 model, args.model, physics, seq_path, a, b, output_dir,
                 data_scale, args.max_frames, args.frame_stride, save_noisy,
-                args.n_samples, args.geometric_ensemble,
+                args.n_samples, args.geometric_ensemble, args.plain,
             )
 
     if metrics_rows:
