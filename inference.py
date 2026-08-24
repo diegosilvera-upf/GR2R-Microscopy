@@ -55,7 +55,7 @@ device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 
 
 # ---------------------------------------------------------------------------
-# Geometric TTA helpers (D4 group: 4 rotations × 2 reflections)
+# Geometric Test Time Augmentation (TTA) helpers (D4 group: 4 rotations × 2 reflections)
 # ---------------------------------------------------------------------------
 
 
@@ -174,9 +174,10 @@ def ensemble_forward(
 
 
 def build_model(model_type: str, noise: float, alpha: float) -> torch.nn.Module:
+    #mix feelings with this function. R2R hard-coded. I avoid this by calling model.model
     noise_model = dinv.physics.PoissonNoise(noise)
     noise_model.sigma = noise
-    criterion = R2RLoss(noise_model=noise_model, alpha=alpha)
+    criterion = R2RLoss(noise_model=noise_model, alpha=alpha) #This is what's fucking up the inference when using other weights.
 
     if model_type == "drunet":
         backbone = dinv.models.DRUNet(
@@ -194,13 +195,16 @@ def load_weights(model: torch.nn.Module, weights_path: Path) -> None:
     checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint.get("model_state_dict", checkpoint))
     cleaned = {k: v for k, v in state_dict.items() if not k.startswith("noise_model.")}
-    # If checkpoint keys don't overlap with model keys, try adding "model." prefix.
-    # This handles plain FastDVDNet checkpoints loaded into FastDVDNetContextWrapper.
+    # If checkpoint keys don't overlap with model keys, try adding "model." or
+    # "model.model." prefix. This handles plain FastDVDNet checkpoints loaded into
+    # FastDVDNetContextWrapper (one level) or further wrapped by R2RModel (two levels).
     model_keys = set(model.state_dict().keys())
     if not (model_keys & set(cleaned.keys())):
-        prefixed = {f"model.{k}": v for k, v in cleaned.items()}
-        if model_keys & set(prefixed.keys()):
-            cleaned = prefixed
+        for prefix in ("model.", "model.model."):
+            prefixed = {f"{prefix}{k}": v for k, v in cleaned.items()}
+            if model_keys & set(prefixed.keys()):
+                cleaned = prefixed
+                break
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
     if missing:
         print(f"WARNING: {len(missing)} missing keys when loading weights")
