@@ -8,7 +8,7 @@ by dividing by data_scale. The effective noise parameter is noise_level = 1/data
 
 
 Each frame costs K × 2 forward passes (K = --n-b). At inference without gradients
-this is cheap, so K=8 or K=16 is a reasonable default. Variance scales as 1/(M·K)
+this is cheap, so K=8 could be a reasonable default. Variance scales as 1/(M·K)
 where M is the number of pixels; returns diminish fast for large images.
 
 
@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime
 from pathlib import Path
 
 
@@ -266,26 +267,38 @@ def pure_tif_sequence(
    frame_stride: int,
    n_b: int,
    gt_path: Path | None = None,
+   gt_frame_dir: Path | None = None,
    plain: bool = False,
 ) -> dict:
-   """Generic TIF sequence. Pass gt_path to also compute true MSE alongside PURE."""
+   """Generic TIF sequence. Pass gt_path (single GT shared by the whole sequence)
+   OR gt_frame_dir (one GT .tif per frame, same filename as the noisy frame) to
+   also compute true MSE alongside PURE."""
    seq_name = tif_files[0].parent.name
    frame_pures: list[float] = []
    frame_mses: list[float] = []
 
 
-   # Load GT once — it's the same clean image for every noisy frame in the sequence
-   x_clean = None
-   if gt_path is not None:
+   # Single GT shared across all frames (one PNG per sequence, e.g. static sequences)
+   x_clean_fixed = None
+   if gt_frame_dir is None and gt_path is not None:
        if not gt_path.exists():
            print(f"  WARNING: GT not found at {gt_path}, skipping true MSE")
        else:
-        #    x_clean = read_tif_tensor(gt_path, data_scale).unsqueeze(0).to(device)
-        #    x_clean = torch.clamp(x_clean, min=0.0)
-        #    x_clean = crop_to_model(x_clean, model_type)
-        x_clean = read_png_tensor(gt_path).unsqueeze(0).to(device)
-        x_clean = torch.clamp(x_clean, min=0.0)
-        x_clean = crop_to_model(x_clean, model_type)
+           x_clean_fixed = read_png_tensor(gt_path).unsqueeze(0).to(device)
+           x_clean_fixed = torch.clamp(x_clean_fixed, min=0.0)
+           x_clean_fixed = crop_to_model(x_clean_fixed, model_type)
+
+
+   def load_gt_for(tif_file: Path) -> torch.Tensor | None:
+       if gt_frame_dir is not None:
+           candidate = gt_frame_dir / tif_file.name
+           if not candidate.exists():
+               print(f"  WARNING: GT frame not found at {candidate}, skipping true MSE for this frame")
+               return None
+           x = read_tif_tensor(candidate, data_scale).unsqueeze(0).to(device)
+           x = torch.clamp(x, min=0.0)
+           return crop_to_model(x, model_type)
+       return x_clean_fixed
 
 
    if model_type == "drunet":
@@ -298,6 +311,7 @@ def pure_tif_sequence(
            y = crop_to_model(y, model_type)
            samples = [compute_pure_mc(model, y, physics, noise_level, plain=plain) for _ in range(n_b)]
            frame_pures.append(float(np.mean(samples)))
+           x_clean = load_gt_for(tif_files[i])
            if x_clean is not None:
                x_est = plain_forward(model, y, physics) if plain else model(y, physics)
                frame_mses.append(((x_est - x_clean) ** 2).mean().item())
@@ -322,6 +336,7 @@ def pure_tif_sequence(
                for _ in range(n_b)
            ]
            frame_pures.append(float(np.mean(samples)))
+           x_clean = load_gt_for(tif_files[i])  # GT matching the *central* frame i
            if x_clean is not None:
                if plain:
                    x_est = plain_forward(model, y_central, physics, y_stack)
@@ -364,6 +379,27 @@ def write_per_frame_csv(row: dict, output_dir: Path, run_name: str) -> None:
     print(f"    Per-frame CSV: {out_path}")
 
 
+def save_run_config(
+    output_path: Path,
+    args: argparse.Namespace,
+    lines: list[str],
+    noise_level: float,
+    data_scale: float,
+) -> None:
+    config_path = output_path.parent / f"{output_path.stem}_config.txt"
+    with open(config_path, "w") as f:
+        f.write(f"timestamp={datetime.now().isoformat()}\n")
+        f.write(f"device={device}\n")
+        for k, v in vars(args).items():
+            f.write(f"{k}={v}\n")
+        f.write(f"noise_level={noise_level}\n")
+        f.write(f"data_scale={data_scale}\n")
+        f.write(f"n_sequences={len(lines)}\n")
+        f.write("sequences:\n")
+        for s in lines:
+            f.write(f"  {s}\n")
+    print(f"Run config saved to {config_path}")
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -400,6 +436,13 @@ def main() -> None:
        help="Poisson noise level = 1/data_scale for γ=1 data (default: derived from --data-scale)",
    )
    parser.add_argument("--alpha", type=float, default=0.15, help="R2R alpha used at training time")
+   parser.add_argument(
+       "--eval-n-samples",
+       type=int,
+       default=5,
+       help="FastDVDNet only: stochastic R2R recorruptions R2RModel averages per forward call "
+            "in non-plain mode (deepinv's own default is 5). Ignored when --plain is set.",
+   )
    parser.add_argument("--data-scale", type=float, default=None, help="Pixel scale factor (required for tif-seq)")
    parser.add_argument(
        "--n-b",
@@ -411,8 +454,10 @@ def main() -> None:
        "--gt-dir",
        type=Path,
        default=None,
-       help="Directory with GT TIF files named <sequence_name>.png (one per sequence). "
-            "Only used with --dataset tif-seq. Adds true_mse_mean/std columns to the CSV.",
+       help="Directory with ground truth for --dataset tif-seq. Supports two layouts: "
+            "a flat '<sequence_name>.png' (one GT shared by all frames, e.g. static sequences), "
+            "or a '<sequence_name>/' subfolder with one GT .tif per frame matching the noisy "
+            "frame's filename (e.g. motion sequences). Adds true_mse_mean/std columns to the CSV.",
    )
    parser.add_argument("--max-frames", type=int, default=None)
    parser.add_argument("--frame-stride", type=int, default=1)
@@ -463,9 +508,10 @@ def main() -> None:
        f"{len(lines)} sequence(s) | model={args.model} | device={device} | "
        f"noise_level={noise_level:.2e} | n_b={args.n_b} | plain={args.plain}"
    )
+   save_run_config(output_path, args, lines, noise_level, data_scale)
 
 
-   model = build_model(args.model, noise, args.alpha)
+   model = build_model(args.model, noise, args.alpha, args.eval_n_samples)
    load_weights(model, args.weights)
    model.eval()
 
@@ -489,7 +535,7 @@ def main() -> None:
            )
            if row:
                rows.append(row)
-               print(f"    DEBUG line 470 row keys: {list(row.keys())}")
+               # print(f"    DEBUG line 470 row keys: {list(row.keys())}")
                write_per_frame_csv(row, output_path.parent, output_path.stem)
                print(f"    PURE = {row['pure_mean']:.4e} ± {row['pure_std']:.4e}  ({row['n_frames']} frames)")
 
@@ -509,7 +555,7 @@ def main() -> None:
                )
            if row:
                rows.append(row)
-               print(f"    DEBUG line 488 row keys: {list(row.keys())}")
+               # print(f"    DEBUG line 488 row keys: {list(row.keys())}")
                write_per_frame_csv(row, output_path.parent, output_path.stem)
                msg = f"    PURE = {row['pure_mean']:.4e} ± {row['pure_std']:.4e}"
                if "true_mse" in row:
@@ -521,17 +567,24 @@ def main() -> None:
        tif_seqs = [resolve_tif_sequence(line) for line in lines]
        for tif_files in tif_seqs:
            seq_name = tif_files[0].parent.name
-           gt_path = (args.gt_dir / f"{seq_name}.png") if args.gt_dir is not None else None
+           gt_path = None
+           gt_frame_dir = None
+           if args.gt_dir is not None:
+               per_frame_dir = args.gt_dir / seq_name
+               if per_frame_dir.is_dir():
+                   gt_frame_dir = per_frame_dir
+               else:
+                   gt_path = args.gt_dir / f"{seq_name}.png"
            print(f"  {seq_name} ({len(tif_files)} frames)...")
            row = pure_tif_sequence(
                model, args.model, physics, tif_files,
                data_scale, noise_level, args.max_frames, args.frame_stride, args.n_b,
-               gt_path=gt_path, plain=args.plain,
+               gt_path=gt_path, gt_frame_dir=gt_frame_dir, plain=args.plain,
            )
            if row:
                rows.append(row)
-               print(f"    DEBUG line 510 row keys: {list(row.keys())}")
-               print(f"    DEBUG frame_pures: {len(row.get('frame_pures', []))} frames, frame_mses: {len(row.get('frame_mses', []))} frames")
+              # print(f"    DEBUG line 510 row keys: {list(row.keys())}")
+              # print(f"    DEBUG frame_pures: {len(row.get('frame_pures', []))} frames, frame_mses: {len(row.get('frame_mses', []))} frames")
                write_per_frame_csv(row, output_path.parent, output_path.stem)
                msg = f"    PURE = {row['pure_mean']:.4e} ± {row['pure_std']:.4e}"
                if "true_mse_mean" in row:

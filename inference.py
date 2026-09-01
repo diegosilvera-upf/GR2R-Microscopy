@@ -173,11 +173,11 @@ def ensemble_forward(
 # ---------------------------------------------------------------------------
 
 
-def build_model(model_type: str, noise: float, alpha: float) -> torch.nn.Module:
+def build_model(model_type: str, noise: float, alpha: float, eval_n_samples: int = 5) -> torch.nn.Module:
     #mix feelings with this function. R2R hard-coded. I avoid this by calling model.model
     noise_model = dinv.physics.PoissonNoise(noise)
     noise_model.sigma = noise
-    criterion = R2RLoss(noise_model=noise_model, alpha=alpha) #This is what's fucking up the inference when using other weights.
+    criterion = R2RLoss(noise_model=noise_model, alpha=alpha, eval_n_samples=eval_n_samples) #This is what's fucking up the inference when using other weights.
 
     if model_type == "drunet":
         backbone = dinv.models.DRUNet(
