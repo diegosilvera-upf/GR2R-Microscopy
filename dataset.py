@@ -43,26 +43,26 @@ def get_valid_sequences(
             if not seq.is_dir():
                 continue
 
-            preproc_file = seq / "pre-processing.txt"
+            preproc_file = seq / "pre-processing.txt" # Condición preprocessing file
             if not preproc_file.exists():
                 f_invalid.write(f"{seq.name}, no pre-processing.txt file\n")
                 continue
 
-            try:
+            try: # Se ve que en algún momento había más de un formato de preprocessing file.
                 params = np.loadtxt(preproc_file)
                 if params.ndim == 1:
                     a, b = params[0], params[1]
                 else:
                     a, b = params.flatten()[0], params.flatten()[1]
-            except Exception as e:
+            except Exception as e: # Condición preprocessing legible
                 f_invalid.write(f"{seq.name}, error reading pre-processing.txt: {e}\n")
                 continue
 
-            if np.abs(a - 1) > 0.2:
+            if np.abs(a - 1) > 0.2: # Umbrales hard-coded para a \approx 1 en Poisson
                 f_invalid.write(f"{seq.name}, a={a}\n")
                 continue
 
-            tif_files = sorted(seq.glob("*.tif"))
+            tif_files = sorted(seq.glob("*.tif")) # Condición tif
             if not tif_files:
                 continue
 
@@ -73,7 +73,7 @@ def get_valid_sequences(
                 else [""]
             )
 
-            has_enough_frames = False
+            has_enough_frames = False # Condición más de 5 frames
             for ch in channels:
                 frames = [f for f in tif_files if ch in f.name] if ch else tif_files
                 if len(frames) >= 5:
@@ -365,7 +365,7 @@ class FMDDataset(Dataset):
     def __getitem__(self, idx):
         stack_paths, gt_path = self.stacks[idx]
 
-        if self.mode == "raw":
+        if self.mode == "raw": #Raw data de FMDD?
             frames = [self._read_png(p) for p in stack_paths]
             stack = torch.cat(frames, dim=0)
             target = (
@@ -376,7 +376,7 @@ class FMDDataset(Dataset):
             if self.patch_size is not None:
                 stack, target = self._random_crop(stack, target)
 
-        elif self.mode == "clean":
+        elif self.mode == "clean": #Solo gt, yo agrego el ruido en el entrenamiento
             clean = self._read_png(gt_path)
             if self.patch_size is not None:
                 (clean,) = self._random_crop(clean)

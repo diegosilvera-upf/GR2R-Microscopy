@@ -32,6 +32,7 @@ def load_config(yaml_path: str) -> SimpleNamespace:
         "l2r_eval_n_samples": 5,
         "l2r_recorruptor_ckpt": None,
         "l2r_recorruptor_lr": 1e-4,
+        "thinning_q": None,
     }
     for k, v in defaults.items():
         raw.setdefault(k, v)

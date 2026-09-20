@@ -1,0 +1,12 @@
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/Confocal_BPAE_B_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/Confocal_BPAE_G_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/Confocal_BPAE_R_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/Confocal_FISH_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/Confocal_MICE_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/TwoPhoton_BPAE_B_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/TwoPhoton_BPAE_G_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/TwoPhoton_BPAE_R_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/TwoPhoton_MICE_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/WideField_BPAE_B_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/WideField_BPAE_G_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/WideField_BPAE_R_1

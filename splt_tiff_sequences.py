@@ -21,7 +21,7 @@ def split_tiff_sequences(input_dir, output_dir):
 
     tif_files = [
         f for f in input_dir.iterdir()
-        if f.is_file() and f.suffix.lower() in [".tif", ".tiff"]
+        if f.is_file() and f.suffix.lower() in [".tif", ".tiff"] and not f.name.startswith("._")
     ]
 
     print(f"Found {len(tif_files)} TIFF files.")
@@ -51,7 +51,7 @@ def split_tiff_sequences(input_dir, output_dir):
 
 if __name__ == "__main__":
 
-    input_dir = "results/denoising-poisson-loreal-fastdvdnet-l2r/tif_output_2026_06_25-19_39_41"
-    output_dir = "results/denoising-poisson-loreal-fastdvdnet-l2r/tif_output_2026_06_30-testing_indexes"
+    input_dir = "/mnt/adisk/dewil/diego/denoising-poisson-loreal-fastdvdnet-prl-q0.5/tif_output_2026_09_19-01_43_00/seqs"
+    output_dir = "/mnt/adisk/dewil/diego/denoising-poisson-loreal-fastdvdnet-prl-q0.5/tif_output_2026_09_19-01_43_00/seqs_split"
 
     split_tiff_sequences(input_dir, output_dir)

@@ -48,7 +48,7 @@ def main() -> None:
     cfg = load_config(args.config)
     assert cfg.model in ("drunet", "fastdvdnet"), f"Unknown model: {cfg.model}"
     assert cfg.dataset in ("fmdd", "loreal"), f"Unknown dataset: {cfg.dataset}"
-    assert cfg.loss in ("r2r", "l2r"), f"Unknown loss: {cfg.loss}"
+    assert cfg.loss in ("r2r", "l2r", "prl"), f"Unknown loss: {cfg.loss}"
 
     # Output directory
     if cfg.inference_dir is not None:
@@ -71,7 +71,7 @@ def main() -> None:
 
     # Model
     model, criterion = build_train_model(cfg, noise_model)
-    load_pretrained(model, cfg)
+    load_pretrained(model, cfg) #The if not cfg.pretrained_ckpt is in the function
     if cfg.loss == "l2r":
         optimizer = optim.Adam(model.model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     else:
@@ -84,7 +84,7 @@ def main() -> None:
         if cfg.dataset == "fmdd":
             _, _, test_dataset, test_seq, visualize_indices = build_fmdd_datasets(cfg)
             export_fmdd_samples(model, cfg, physics, test_dataset, visualize_indices, output_dir)
-        else:
+        else: # Loreal
             _, _, _, val_seq, test_seq, visualize_names = build_loreal_datasets(cfg)
             explicit_viz = [s for s in val_seq + test_seq if Path(s[0]).name in set(visualize_names)]
             seqs = explicit_viz or val_seq
@@ -100,14 +100,14 @@ def main() -> None:
         n_eval = len(test_seq)
         if cfg.n_eval_sequences is not None:
             n_eval = min(n_eval, cfg.n_eval_sequences)
-        eval_cache = build_eval_cache(test_dataset, physics, n_eval, device, cfg.eval_seed, num_frames=num_frames)
-        val_loader = None
-        val_seq = None
+        eval_cache = build_eval_cache(test_dataset, physics, n_eval, device, cfg.eval_seed, num_frames=num_frames) #Parea gt y noisy_data
+        val_loader = None #No hay val?
+        val_seq = None  # No hay val?
         visualize_names = None
-    else:
+    else: # Loreal
         train_loader, val_loader, train_seq, val_seq, test_seq, visualize_names = build_loreal_datasets(cfg)
         eval_cache = None
-        test_dataset = None
+        test_dataset = None #Tested on val data
         visualize_indices = None
 
     # Checkpoint tracking — FMDD keeps best-by-loss AND best-by-PSNR; Loreal only best-by-loss
@@ -121,7 +121,7 @@ def main() -> None:
 
     train_losses: list[float] = []
     val_losses: list[float] = []
-    val_psnrs: list[float] = []  # empty for Loreal
+    val_psnrs: list[float] = []  # empty for Loreal, only used for FMDD
 
     # Training loop
     for epoch in range(cfg.epochs):
@@ -149,7 +149,7 @@ def main() -> None:
             if cfg.model == "drunet":
                 x_est = model(y, physics, update_parameters=True)
                 loss = criterion(x_est, y, physics, model)
-            else:
+            else: # fastdvdnet
                 y_central = y[:, 2:3]
                 model.model.set_context(y)
                 x_est = model(y_central, physics, update_parameters=True)

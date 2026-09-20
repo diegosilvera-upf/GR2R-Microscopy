@@ -5,8 +5,6 @@ Instead of copying these classes/functions into every script, they live here
 and each script imports what it needs.
 """
 
-import sys
-sys.path.insert(0, "/home/diegosilvera/Escritorio/learning2recorrupt")
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +13,6 @@ import deepinv as dinv
 import torch
 import torch.nn as nn
 from deepinv.loss import PSNR, R2RLoss
-from l2r import L2RLoss, Recorruptor
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
@@ -41,13 +38,13 @@ class FastDVDNetContextWrapper(nn.Module):
     """
 
     def __init__(self, model):
-        super().__init__()
-        self.model = model
+        super().__init__() # Pytorch
+        self.model = model # Recibe clase FastDVDNet, no la reemplaza
         self._context = None
 
     def set_context(self, stack):
         """Store the full 5-frame stack before each forward pass."""
-        self._context = stack.detach()
+        self._context = stack.detach() #Guarda el stack dentro de un objeto. Desconectado del grafo de gradientes
 
     def forward(self, y_central, physics=None, **kwargs):
         if self._context is None:
@@ -187,10 +184,18 @@ def build_eval_cache(test_dataset, physics, n_eval, device, seed, num_frames=1):
 
 def build_train_model(cfg: SimpleNamespace, noise_model) -> torch.nn.Module:
     if cfg.loss == "l2r":
+        import sys
+        sys.path.insert(0, "/home/diegosilvera/Escritorio/learning2recorrupt")
+        from l2r import L2RLoss, Recorruptor
+
         recorruptor = Recorruptor(kernel_size=1, multiplicative=True, sigma=0.4).to(device)
         if cfg.l2r_recorruptor_ckpt:
             recorruptor.load_state_dict(torch.load(cfg.l2r_recorruptor_ckpt, map_location=device))
         criterion = L2RLoss(recorruptor=recorruptor, alpha=cfg.alpha, eval_n_samples=cfg.l2r_eval_n_samples, recorruptor_lr=cfg.l2r_recorruptor_lr)
+    elif cfg.loss == "prl":
+        from poisson_thinning_loss import PoissonThinningLoss
+
+        criterion = PoissonThinningLoss(gamma_tn=cfg.gamma, q=cfg.thinning_q)
     else:
         criterion = R2RLoss(noise_model=noise_model, alpha=cfg.alpha)
     if cfg.model == "drunet":
@@ -239,14 +244,14 @@ def build_fmdd_datasets(cfg: SimpleNamespace):
     print(f"Found {len(sequences)} FMDD sequences.")
 
     split_file = Path(cfg.fmdd_split_file)
-    train_seq, test_seq, visualize_indices = get_fmdd_split_from_file(sequences, split_file)
+    train_seq, test_seq, visualize_indices = get_fmdd_split_from_file(sequences, split_file) # Acá ya es evidente que no uso val, no recuerdo por qué
     print(f"Split: {len(train_seq)} train / {len(test_seq)} test")
 
     transform = transforms.Compose([
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
     ])
-    num_frames = 5 if cfg.model == "fastdvdnet" else 1
+    num_frames = 5 if cfg.model == "fastdvdnet" else 1 #else es drunet, procesa frame a frame
 
     train_dataset = FMDDataset(
         sequence_info=train_seq,

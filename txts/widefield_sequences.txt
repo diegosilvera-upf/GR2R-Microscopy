@@ -1,0 +1,3 @@
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/WideField_BPAE_B_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/WideField_BPAE_G_1
+/mnt/bdisk/dewil/loreal_POC2/diego/noisy_Poisson1/WideField_BPAE_R_1
