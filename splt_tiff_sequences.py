@@ -51,7 +51,7 @@ def split_tiff_sequences(input_dir, output_dir):
 
 if __name__ == "__main__":
 
-    input_dir = "/mnt/adisk/dewil/diego/denoising-poisson-loreal-fastdvdnet-prl-q0.5/tif_output_2026_09_19-01_43_00/seqs"
-    output_dir = "/mnt/adisk/dewil/diego/denoising-poisson-loreal-fastdvdnet-prl-q0.5/tif_output_2026_09_19-01_43_00/seqs_split"
+    input_dir = "/mnt/adisk/dewil/diego/denoising-poisson-loreal-fastdvdnet-prl-q0.85/tif_output_2026_09_21-10_45_22/seqs"
+    output_dir = "/mnt/adisk/dewil/diego/denoising-poisson-loreal-fastdvdnet-prl-q0.85/tif_output_2026_09_21-10_45_22/seqs_split"
 
     split_tiff_sequences(input_dir, output_dir)

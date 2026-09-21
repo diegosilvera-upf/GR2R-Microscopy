@@ -55,10 +55,9 @@ from tqdm import tqdm
 
 
 from dataset import LorealSequenceDataset
-from inference import (
+from inference_utils import (
    apply_params_from_checkpoint_dir,
    build_model,
-   compute_pure_mc,
    crop_to_model,
    device,
    load_weights,
@@ -70,6 +69,71 @@ from inference import (
    resolve_loreal_sequence,
    resolve_tif_sequence,
 )
+
+# ---------------------------------------------------------------------------
+# Blind quality metric: PURE (Poisson Unbiased Risk Estimator)
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def compute_pure_mc(
+    model: torch.nn.Module,
+    y_central: torch.Tensor,
+    physics,
+    noise_level: float,
+    y_stack: torch.Tensor | None = None,
+    eps: float | None = None,
+    plain: bool = False,
+) -> float:
+    """MC estimate of per-pixel MSE without a clean reference (PURE for Poisson noise).
+
+    Assumes y ~ Poisson(x / noise_level) * noise_level (deepinv PoissonNoise convention).
+    Costs 2 forward passes using a Rademacher perturbation b ∈ {-1, +1}^N:
+
+        PURE = (1/M)[‖f(y)-y‖² + 2·α·(y⊙b)ᵀ(f(y+εb)-f(y))/ε − α·∑ᵢyᵢ]
+
+    where α = noise_level, M = number of pixels, and ε defaults to noise_level
+    (= one photon count in the normalized domain).
+
+    The second term estimates the weighted divergence ∑ᵢ yᵢ ∂fᵢ/∂yᵢ — how much
+    the denoiser "shrinks" the observation, which corrects the positive bias from
+    the first term.
+
+    Args:
+        y_central: [1, 1, H, W] central (or only) frame, normalized to [0, 1].
+        y_stack:   [1, 5, H, W] full temporal stack for FastDVDNet; None for DRUNet.
+                   Only the central frame is perturbed; context frames are fixed.
+        eps:       finite-difference step; defaults to noise_level.
+        plain:     if True, bypass R2RModel's stochastic test-time ensembling and
+                   use a single deterministic pass through the trained backbone
+                   (see `plain_forward`) for both forward evaluations.
+    """
+    if eps is None:
+        eps = noise_level
+
+    b = 2 * torch.randint(0, 2, y_central.shape, device=y_central.device, dtype=y_central.dtype) - 1
+    y_pert = (y_central + eps * b).clamp(min=0.0)
+
+    if plain:
+        f_y = plain_forward(model, y_central, physics, y_stack)
+        f_yb = plain_forward(model, y_pert, physics, y_stack)
+    elif y_stack is not None:
+        # FastDVDNet: set context, perturb only central frame
+        model.model.set_context(y_stack)
+        f_y = model(y_central, physics)
+        model.model.set_context(y_stack)
+        f_yb = model(y_pert, physics)
+    else:
+        f_y = model(y_central, physics)
+        f_yb = model(y_pert, physics)
+
+    n_pixels = f_y.numel()
+    residual_sq = ((f_y - y_central) ** 2).sum()
+    weighted_div = ((y_central * b) * (f_yb - f_y) / eps).sum()
+    bias_corr = noise_level * y_central.sum()
+
+    return ((residual_sq + 2 * noise_level * weighted_div - bias_corr) / n_pixels).item()
+
 
 # ---------------------------------------------------------------------------
 # Per-sequence PURE functions

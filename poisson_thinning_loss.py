@@ -9,13 +9,17 @@ approximation.
 Convention (matches deepinv.physics.noise.PoissonNoise, which is what
 actually generates y for FMDD training):
 
-    y = gamma * Poisson(x / gamma)
+    y = gamma * Poisson(x / gamma) #Tachella's notation
 
 so the realized photon count is recovered as `count = y / gamma`, and a
 LARGER gamma means MORE noise (fewer photons). To simulate additional
 degradation on top of an already gamma_tn-noisy measurement y, its
 recovered count is thinned down to an effective gamma_t > gamma_tn, with
 retention probability q = gamma_tn / gamma_t (equivalently gamma_t = gamma_tn / q).
+
+OJO: Los gammas están definidos con la notación de Tachella, inverso a mis cuentas.
+     Esto es porque el código se escribió en base al de Tachella, y uso DeepInv en  
+     algunas partes. 
 """
 
 import torch
@@ -48,7 +52,8 @@ class PoissonThinningLoss(nn.Module):
             y * torch.log(y.clamp_min(self.eps) / x_hat),
             torch.zeros_like(y),
         )
-        return (term + x_hat - y).mean()
+        return (term + x_hat - y).mean() # Un escalar por imagen
+    
 
 
 class _ThinningWrapper(nn.Module):
@@ -67,9 +72,9 @@ class _ThinningWrapper(nn.Module):
     def forward(self, y, physics=None, update_parameters=False):
         z = self._thin(y)
         x_hat = self.model(z)
-        if update_parameters:
+        if update_parameters: #True for training, False for inference
             return x_hat  # used by criterion(x_est, y, physics, model) during train / val-loss
         # The PRL minimizer is E[y|z] = q*z + (1-q)*E[x|z]; solve for E[x|z]. Same as
         # (gamma_t*x_hat - gamma_tn*z)/(gamma_t - gamma_tn): x_hat and z live in the rescaled
         # [0,1] domain, so gamma must weight both terms or the output is off by 1/gamma.
-        return (x_hat - self.q * z) / (1.0 - self.q)
+        return (x_hat - self.q * z) / (1.0 - self.q) #Final estimation, only just for output/visualization
